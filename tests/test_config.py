@@ -101,7 +101,7 @@ class TestAppConfig:
         assert config.copy_sidecar is False
         assert config.modify_exif is True
         assert config.dry_run is False
-        assert config.copy_non_media is True
+        assert config.copy_non_media is False
 
 
 class TestStorageLayout:
