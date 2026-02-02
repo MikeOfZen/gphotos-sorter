@@ -131,9 +131,9 @@ def run_ingestion(
         help="Maximum number of tags to include in filename (default: no limit)"
     ),
     # File handling options
-    skip_non_media: bool = typer.Option(
-        False, "--skip-non-media",
-        help="Skip non-media files (default: copy them with a warning)"
+    include_non_media: bool = typer.Option(
+        False, "--include-non-media",
+        help="Include non-media files (default: skip them)"
     ),
     copy_sidecar: bool = typer.Option(
         False, "--copy-sidecar",
@@ -181,7 +181,7 @@ def run_ingestion(
         storage_layout=storage_layout,
         db_path=db_path.expanduser().resolve() if db_path else None,
         filename_format=filename_format,
-        copy_non_media=not skip_non_media,
+        copy_non_media=include_non_media,
         copy_sidecar=copy_sidecar,
         modify_exif=not no_exif,
         dry_run=dry_run,
@@ -222,7 +222,7 @@ def run_ingestion(
     
     # Show file handling options
     options = []
-    if skip_non_media:
+    if not include_non_media:
         options.append("skip-non-media")
     if copy_sidecar:
         options.append("copy-sidecar")
@@ -230,7 +230,7 @@ def run_ingestion(
         options.append("no-exif")
     if options:
         typer.echo(f"Options: {', '.join(options)}")
-    elif not skip_non_media:
+    elif include_non_media:
         typer.echo("Non-media files: copy with warning")
     
     typer.echo("---")

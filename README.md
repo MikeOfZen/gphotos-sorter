@@ -2,6 +2,8 @@
 
 A CLI tool for ingesting and organizing Google Photos takeout exports and other photo archives. It deduplicates media using perceptual hashing, preserves album metadata as EXIF tags, and organizes files into a clean folder structure.
 
+**Because degoogling shouldn't require a PhD in file management.** 📸
+
 ## Features
 
 - **Deduplication**: Uses perceptual image hashing to detect duplicate photos even if they've been resized or recompressed
@@ -25,38 +27,79 @@ A CLI tool for ingesting and organizing Google Photos takeout exports and other 
 - Python 3.10+
 - exiftool (required for EXIF manipulation)
 
+#### Install exiftool
+
+**Debian/Ubuntu:**
 ```bash
-# Install exiftool
-# On Debian/Ubuntu:
 sudo apt-get install libimage-exiftool-perl
+```
 
-# On macOS:
+**macOS (Homebrew):**
+```bash
 brew install exiftool
+```
 
-# On Fedora:
+**Fedora/RHEL:**
+```bash
 sudo dnf install perl-Image-ExifTool
+```
+
+**Windows:** Download from [exiftool website](https://exiftool.org) or use:
+```bash
+choco install exiftool
 ```
 
 ### Install gphotos-sorter
 
+**Option 1: From PyPI (recommended)**
+
 ```bash
-# Clone the repository
-git clone https://github.com/yourusername/gphotos-sorter.git
+pip install gphotos-sorter
+```
+
+Verify installation:
+```bash
+gphotos-sorter --version
+gphotos-sorter --help
+```
+
+**Option 2: From GitHub (development version)**
+
+```bash
+git clone https://github.com/MikeOfZen/gphotos-sorter.git
 cd gphotos-sorter
-
-# Create virtual environment and install
-python -m venv .venv
-source .venv/bin/activate
-pip install -e .
+pip install .
 ```
 
-Or with uv:
+**Option 3: With uv (fast Python package manager)**
 
 ```bash
-uv venv
-source .venv/bin/activate
-uv pip install -e .
+uv tool install gphotos-sorter
 ```
+
+**Option 4: Development setup**
+
+```bash
+git clone https://github.com/MikeOfZen/gphotos-sorter.git
+cd gphotos-sorter
+pip install -e ".[dev]"
+pytest
+```
+
+## Configuration
+
+Create a config file at `~/.config/gphotos-sorter/config.yaml`:
+
+```yaml
+output_root: /path/to/organized/photos
+date_folder_format: YYYY/MM/DD
+filename_format: "{date} {album} {original_filename}"
+max_tags: null
+modify_exif: true
+copy_sidecar: true
+```
+
+Or pass options directly via CLI.
 
 ## Quick Start
 

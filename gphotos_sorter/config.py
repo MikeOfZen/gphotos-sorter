@@ -78,7 +78,7 @@ class AppConfig(BaseModel):
         description="Filename format options"
     )
     copy_non_media: bool = Field(
-        default=True,
+        default=False,
         description="Copy non-media files to output (with warning)"
     )
     copy_sidecar: bool = Field(
