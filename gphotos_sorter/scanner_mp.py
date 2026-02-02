@@ -205,47 +205,111 @@ def worker_process(
         max_tags=config_dict.get("fmt_max_tags", 5),
     )
     
-    while True:
-        try:
-            item = work_queue.get(timeout=1)
-        except Empty:
-            continue
-        
-        if item == STOP_SENTINEL:
-            break
-        
-        work_item: WorkItem = item
-        
-        try:
-            # Handle non-media files differently
-            if not work_item.is_media:
-                if copy_non_media:
-                    non_media_dir = output_root / work_item.owner / "non_media"
-                    non_media_dir.mkdir(parents=True, exist_ok=True)
-                    dest = non_media_dir / work_item.path.name
-                    counter = 0
-                    while dest.exists():
-                        counter += 1
-                        dest = non_media_dir / f"{work_item.path.stem}_{counter}{work_item.path.suffix}"
-                    shutil.copy2(work_item.path, dest)
-                    # Create a minimal record for non-media
-                    record = MediaRecord(
-                        similarity_hash=f"non_media:{work_item.path}",
-                        canonical_path=str(dest),
-                        owner=work_item.owner,
-                        date_taken=None,
-                        date_source="none",
-                        tags=[],
-                        source_paths=[str(work_item.path)],
-                        status="non_media",
-                        notes=None,
-                    )
-                    result_queue.put(WorkResult(record=record, action="non_media"))
+    try:
+        while True:
+            try:
+                item = work_queue.get(timeout=1)
+            except Empty:
                 continue
             
-            # Compute hash for media files
-            similarity_hash = compute_hash(work_item.path)
-            if not similarity_hash:
+            if item == STOP_SENTINEL:
+                break
+            
+            work_item: WorkItem = item
+            
+            try:
+                # Handle non-media files differently
+                if not work_item.is_media:
+                    if copy_non_media:
+                        non_media_dir = output_root / work_item.owner / "non_media"
+                        non_media_dir.mkdir(parents=True, exist_ok=True)
+                        dest = non_media_dir / work_item.path.name
+                        counter = 0
+                        while dest.exists():
+                            counter += 1
+                            dest = non_media_dir / f"{work_item.path.stem}_{counter}{work_item.path.suffix}"
+                        shutil.copy2(work_item.path, dest)
+                        # Create a minimal record for non-media
+                        record = MediaRecord(
+                            similarity_hash=f"non_media:{work_item.path}",
+                            canonical_path=str(dest),
+                            owner=work_item.owner,
+                            date_taken=None,
+                            date_source="none",
+                            tags=[],
+                            source_paths=[str(work_item.path)],
+                            status="non_media",
+                            notes=None,
+                        )
+                        result_queue.put(WorkResult(record=record, action="non_media"))
+                    continue
+            
+                # Compute hash for media files
+                similarity_hash = compute_hash(work_item.path)
+                if not similarity_hash:
+                    record = MediaRecord(
+                        similarity_hash=f"error:{work_item.path}",
+                        canonical_path="",
+                        owner=work_item.owner,
+                        date_taken=None,
+                        date_source="error",
+                        tags=work_item.tags,
+                        source_paths=[str(work_item.path)],
+                        status="error",
+                        notes="hash_failed",
+                    )
+                    result_queue.put(WorkResult(record=record, action="error"))
+                    continue
+                
+                # Put hash result for duplicate check (will be handled by writer)
+                # We'll send a "check" action first, then writer responds via a different mechanism
+                # Actually, simpler: we compute hash and let writer decide insert/update
+                
+                date_taken, date_source = resolve_date(work_item.path, work_item.sidecar_path)
+                output_dir = build_output_dir(output_root, work_item.owner, date_taken, layout)
+                output_dir.mkdir(parents=True, exist_ok=True)
+                canonical_path = find_unique_filename(output_dir, date_taken, work_item.tags, work_item.path.suffix, fmt)
+                
+                # Copy file
+                shutil.copy2(work_item.path, canonical_path)
+                
+                # Process sidecar and write EXIF
+                sidecar_extra = False
+                if work_item.sidecar_path:
+                    sidecar = load_sidecar(work_item.sidecar_path)
+                    if sidecar:
+                        try:
+                            sidecar_to_exif(canonical_path, sidecar, work_item.tags)
+                        except Exception:
+                            pass
+                        sidecar_extra = sidecar_has_extras(sidecar)
+                        if sidecar_extra:
+                            target_sidecar = canonical_path.with_suffix(
+                                canonical_path.suffix + ".supplemental-metadata.json"
+                            )
+                            if not target_sidecar.exists():
+                                shutil.copy2(work_item.sidecar_path, target_sidecar)
+                elif work_item.tags:
+                    try:
+                        sidecar_to_exif(canonical_path, {}, work_item.tags)
+                    except Exception:
+                        pass
+                
+                status = "ok" if date_taken else "missing_date"
+                record = MediaRecord(
+                    similarity_hash=similarity_hash,
+                    canonical_path=str(canonical_path),
+                    owner=work_item.owner,
+                    date_taken=date_taken.isoformat() if date_taken else None,
+                    date_source=date_source,
+                    tags=sorted(set(work_item.tags)),
+                    source_paths=[str(work_item.path)],
+                    status=status,
+                    notes=None if not sidecar_extra else "sidecar_copied",
+                )
+                result_queue.put(WorkResult(record=record, action="insert"))
+                
+            except Exception as e:
                 record = MediaRecord(
                     similarity_hash=f"error:{work_item.path}",
                     canonical_path="",
@@ -255,72 +319,11 @@ def worker_process(
                     tags=work_item.tags,
                     source_paths=[str(work_item.path)],
                     status="error",
-                    notes="hash_failed",
+                    notes=str(e),
                 )
                 result_queue.put(WorkResult(record=record, action="error"))
-                continue
-            
-            # Put hash result for duplicate check (will be handled by writer)
-            # We'll send a "check" action first, then writer responds via a different mechanism
-            # Actually, simpler: we compute hash and let writer decide insert/update
-            
-            date_taken, date_source = resolve_date(work_item.path, work_item.sidecar_path)
-            output_dir = build_output_dir(output_root, work_item.owner, date_taken, layout)
-            output_dir.mkdir(parents=True, exist_ok=True)
-            canonical_path = find_unique_filename(output_dir, date_taken, work_item.tags, work_item.path.suffix, fmt)
-            
-            # Copy file
-            shutil.copy2(work_item.path, canonical_path)
-            
-            # Process sidecar and write EXIF
-            sidecar_extra = False
-            if work_item.sidecar_path:
-                sidecar = load_sidecar(work_item.sidecar_path)
-                if sidecar:
-                    try:
-                        sidecar_to_exif(canonical_path, sidecar, work_item.tags)
-                    except Exception:
-                        pass
-                    sidecar_extra = sidecar_has_extras(sidecar)
-                    if sidecar_extra:
-                        target_sidecar = canonical_path.with_suffix(
-                            canonical_path.suffix + ".supplemental-metadata.json"
-                        )
-                        if not target_sidecar.exists():
-                            shutil.copy2(work_item.sidecar_path, target_sidecar)
-            elif work_item.tags:
-                try:
-                    sidecar_to_exif(canonical_path, {}, work_item.tags)
-                except Exception:
-                    pass
-            
-            status = "ok" if date_taken else "missing_date"
-            record = MediaRecord(
-                similarity_hash=similarity_hash,
-                canonical_path=str(canonical_path),
-                owner=work_item.owner,
-                date_taken=date_taken.isoformat() if date_taken else None,
-                date_source=date_source,
-                tags=sorted(set(work_item.tags)),
-                source_paths=[str(work_item.path)],
-                status=status,
-                notes=None if not sidecar_extra else "sidecar_copied",
-            )
-            result_queue.put(WorkResult(record=record, action="insert"))
-            
-        except Exception as e:
-            record = MediaRecord(
-                similarity_hash=f"error:{work_item.path}",
-                canonical_path="",
-                owner=work_item.owner,
-                date_taken=None,
-                date_source="error",
-                tags=work_item.tags,
-                source_paths=[str(work_item.path)],
-                status="error",
-                notes=str(e),
-            )
-            result_queue.put(WorkResult(record=record, action="error"))
+    except KeyboardInterrupt:
+        pass
 
 
 def writer_process(
@@ -375,6 +378,8 @@ def writer_process(
             total = processed + skipped + errors + non_media
             if total % 100 == 0:
                 print(f"Progress: {total}/{total_items} (processed={processed}, skipped={skipped}, non_media={non_media}, errors={errors})")
+    except KeyboardInterrupt:
+        pass
     finally:
         database.close()
         stats_dict["processed"] = processed
@@ -425,15 +430,15 @@ def process_media_mp(
                 media_count += 1
             else:
                 non_media_count += 1
-                logger.warning("Non-media file: %s", item.path)
             if limit and len(work_items) >= limit:
                 break
         if limit and len(work_items) >= limit:
             break
     
-    total_items = len(work_items)
-    logger.info("Found %d new files to process (media=%d, non_media=%d, skipped_known=%d)", 
-                total_items, media_count, non_media_count, skipped_known)
+    # Total items should only count media files for progress tracking
+    total_items = media_count
+    logger.info("Found %d media files to process (%d non-media files will also be handled, %d skipped_known)", 
+                media_count, non_media_count, skipped_known)
     
     if total_items == 0:
         logger.info("============================================================")
@@ -484,20 +489,36 @@ def process_media_mp(
     
     # Feed work items
     logger.info("Starting processing with %d workers...", num_workers)
-    for item in work_items:
-        work_queue.put(item)
+    try:
+        for item in work_items:
+            work_queue.put(item)
+    except KeyboardInterrupt:
+        logger.info("Interrupted by user")
     
     # Send stop sentinels to workers
     for _ in range(num_workers):
-        work_queue.put(STOP_SENTINEL)
+        try:
+            work_queue.put(STOP_SENTINEL)
+        except (KeyboardInterrupt, BrokenPipeError):
+            pass
     
     # Wait for workers to finish
     for p in workers:
-        p.join()
+        try:
+            p.terminate()
+        except (KeyboardInterrupt, BrokenPipeError):
+            pass
     
     # Signal writer to stop and wait
-    stop_event.set()
-    writer.join()
+    try:
+        stop_event.set()
+    except (KeyboardInterrupt, BrokenPipeError):
+        pass
+    
+    try:
+        writer.terminate()
+    except (KeyboardInterrupt, BrokenPipeError):
+        pass
     
     result = {
         "processed": stats_dict.get("processed", 0),
