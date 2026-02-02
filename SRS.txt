@@ -1,0 +1,251 @@
+Alright — I’ll present this as a professional software requirements / specification document, the kind you could hand directly to a development team or contractor.
+
+Clear scope, functional requirements, data model, processing flow, edge cases, and non-functional requirements.
+
+📸 Media Ingestion & Organization System
+Functional Specification & Technical Requirements
+1. 📌 Purpose
+
+Develop a standalone script/application that ingests a disorganized Google Photos export (mixed folders, duplicates, sidecar JSON metadata, mixed media formats), and produces:
+
+• A clean, date-based folder structure for long-term storage
+• A deduplicated media library using perceptual hashing
+• Preservation of all album and tag information
+• A centralized SQLite database (single-table, JSON fields) containing all metadata and file mappings
+
+The system must be deterministic, re-runnable, and not duplicate existing media.
+
+2. 🎯 Core Objectives
+
+Normalize all media into a unified folder structure by date
+
+Preserve all album information as tags
+
+Prevent duplicate file copies
+
+Track all original file locations
+
+Allow querying by date, tag, and source
+
+3. 📥 Input
+
+Root input directory (user-defined):
+
+INPUT_ROOT/
+ ├── Arbitrary folder structure
+ ├── Album folders
+ ├── Date folders
+ ├── Media files (jpg, heic, png, mp4, webp, etc.)
+ └── JSON sidecar metadata files
+
+
+User will pre-separate ownership:
+
+INPUT_ROOT/Mine/
+INPUT_ROOT/Family/
+
+
+Each treated independently but with same logic.
+
+4. 📤 Output
+4.1 Canonical Media Library
+OUTPUT_ROOT/
+ ├── Mine/
+ │    └── YYYY-MM/
+ │         └── normalized_filename.ext
+ └── Family/
+      └── YYYY-MM/
+
+
+All unique media copied once only.
+
+4.2 SQLite Database
+
+Single database file containing all metadata.
+
+5. 🗄 Database Schema (Single Table)
+
+Table name: media
+
+Column	Type	Description
+id	INTEGER PRIMARY KEY	
+similarity_hash	TEXT UNIQUE	
+canonical_path	TEXT	
+owner	TEXT	
+date_taken	TEXT (ISO 8601)	
+date_source	TEXT	
+tags	JSON (array of strings)	
+source_paths	JSON (array of strings)	
+status	TEXT	
+notes	TEXT	
+6. 🔄 Processing Workflow
+6.1 File Discovery
+
+• Recursively traverse input directories
+• Identify media files
+• Associate sidecar JSON files where present
+
+6.2 Date Resolution Logic (Priority Order)
+
+Embedded metadata (EXIF/XMP/Media timestamps)
+
+JSON metadata fields
+
+Parent folder name parsing (regex patterns for common date formats)
+
+If unresolved → mark as missing
+
+Store both:
+
+• date_taken
+• date_source
+
+6.3 Similarity Hashing
+
+• Generate perceptual hash for each media file
+• Used as primary deduplication key
+
+6.4 Tag Aggregation
+
+Tags collected from:
+
+• Album names in JSON metadata
+• (Optional) Folder-based album inference
+
+All tags merged into a unique set.
+
+6.5 Deduplication & Record Handling
+
+Lookup:
+
+similarity_hash
+
+If record exists:
+
+• Append new source path if not present
+• Merge new tags
+• Update record
+• Do not copy file
+
+If record does not exist:
+
+• Create new record
+• Proceed to canonical copy
+
+6.6 Canonical File Storage
+
+Files copied to:
+
+OUTPUT_ROOT/{owner}/{YYYY-MM}/
+
+
+Filename must be deterministic and collision-safe, e.g.:
+
+YYYYMMDD_HHMMSS_<short_hash>.ext
+
+
+Canonical path stored in database.
+
+6.7 Error Handling & Logging
+
+System must:
+
+• Record missing metadata
+• Record failures
+• Continue processing without abort
+
+Status values:
+
+• ok
+• missing_date
+• error
+
+7. 🔁 Re-run Behavior (Idempotency)
+
+System must support multiple runs:
+
+• No duplicate copies created
+• Existing records updated only with new tags/sources
+• Hash uniqueness enforced
+
+8. ⚠ Edge Cases
+
+• Same media in multiple folders
+• Media without metadata
+• Unsupported formats
+• Conflicting timestamps
+• Corrupted files
+
+Must be logged, not fatal.
+
+9. 📊 Performance Expectations
+
+• Capable of handling 100,000+ media files
+• SQLite indexed on similarity_hash
+• Incremental runs should be fast
+
+10. 🔍 Query Capabilities
+
+User should be able to query:
+
+• By date range
+• By tag (JSON search)
+• By owner
+• By duplicate source count
+
+11. 🔐 Data Safety
+
+• No deletion of input files
+• Copies only
+• Atomic DB writes
+
+12. 🧩 Extensibility (Future)
+
+Optional later features:
+
+• Face/person tagging
+• Location clustering
+• Web UI viewer
+• Cloud sync automation
+
+13. 📋 Deliverables
+
+Software provider shall deliver:
+
+Executable script/application
+
+Configuration file for input/output paths
+
+SQLite schema creation script
+
+Documentation for usage and re-runs
+
+Logging output
+
+14. 🛠 Suggested Technology Stack (non-binding)
+
+• Python (or similar scripting language)
+• SQLite with JSON support
+• Perceptual hashing library
+• Metadata parsing library
+
+✅ Acceptance Criteria
+
+✔ All unique media copied once
+✔ All album info preserved as tags
+✔ No duplicates created on rerun
+✔ Missing data clearly logged
+✔ Clean date-based output folders
+
+If you’d like, I can next provide:
+
+📄 A shorter “statement of work” version
+📐 UML-style flow diagram
+🧪 Test scenarios
+📊 Example SQL queries
+
+or turn this into:
+
+👉 A GitHub-ready README/spec
+
+Just tell me 👍
