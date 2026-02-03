@@ -73,6 +73,6 @@ jobs:
                - **Linux**: `sudo apt install libimage-exiftool-perl`
                - **macOS**: `brew install exiftool`
                - **Windows**: `choco install exiftool` or download from [exiftool.org](https://exiftool.org/)
-            4. Run: `./gphotos-sorter-* --help`
+            4. Run: `./gphotos-sorter-* --help` to see available commands (`init-config`, `run`)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
