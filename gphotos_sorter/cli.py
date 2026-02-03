@@ -17,7 +17,6 @@ from .scanner_mp import process_media_mp
 
 app = typer.Typer(
     add_completion=True,
-    no_args_is_help=True,
     help="""Media ingestion and organization CLI.
 
 Ingest Google Photos takeout and other photo archives, deduplicate media,
@@ -55,24 +54,11 @@ def check_exiftool() -> None:
         raise typer.Exit(code=1)
 
 
-@app.command("init-config")
-def init_config(
-    config_path: Path = typer.Option(
-        Path("config.yaml"), "--config", "-c",
-        help="Path to config file to create"
-    ),
-) -> None:
-    """Create a default configuration file."""
-    if config_path.exists():
-        typer.secho(f"Config already exists at {config_path}", fg=typer.colors.RED)
-        raise typer.Exit(code=1)
-    config = AppConfig.default()
-    config.to_yaml(config_path)
-    typer.secho(f"Created config at {config_path}", fg=typer.colors.GREEN)
 
 
-@app.command("run")
-def run_ingestion(
+@app.callback(invoke_without_command=True)
+def main_command(
+    ctx: typer.Context,
     input_path: Optional[List[Path]] = typer.Option(
         None, "--input", "-i",
         help="Input path(s) to process. Can specify multiple times."
@@ -81,8 +67,8 @@ def run_ingestion(
         "Mine", "--owner", "-o",
         help="Owner label for input paths"
     ),
-    output_root: Path = typer.Option(
-        ..., "--output", "-O",
+    output_root: Optional[Path] = typer.Option(
+        None, "--output", "-O",
         help="Output root folder (required)"
     ),
     storage_layout: StorageLayout = typer.Option(
@@ -158,11 +144,20 @@ def run_ingestion(
     extracts dates from EXIF/sidecar/folder names, preserves album info as tags,
     copies unique files to organized output folders, and writes sidecar metadata to EXIF.
     """
+    # If no arguments provided, show help
+    if not input_path and not output_root:
+        typer.echo(ctx.get_help())
+        raise typer.Exit()
+    
     check_exiftool()
     
     # Build config from CLI arguments
     if not input_path:
         typer.secho("ERROR: At least one --input path is required", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+    
+    if not output_root:
+        typer.secho("ERROR: --output path is required", fg=typer.colors.RED)
         raise typer.Exit(code=1)
     
     # Build filename format
