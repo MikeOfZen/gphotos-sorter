@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gphotos-sorter"
-version = "1.0.0"
+version = "0.1.0"
 description = "CLI tool for ingesting and organizing Google Photos takeout exports"
 readme = "README.md"
 license = {text = "MIT"}
