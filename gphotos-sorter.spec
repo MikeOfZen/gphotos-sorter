@@ -1,35 +1,46 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller spec file for gphotos-sorter."""
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
-import sys
-from pathlib import Path
-
-block_cipher = None
+# Collect rich unicode data files and submodules
+rich_datas = collect_data_files('rich')
+rich_hiddenimports = collect_submodules('rich')
 
 a = Analysis(
-    ['gphotos_sorter/cli.py'],
+    ['run_gphotos_sorter.py'],
     pathex=[],
     binaries=[],
-    datas=[],
-    hiddenimports=[
+    datas=rich_datas,
+    hiddenimports=rich_hiddenimports + [
         'typer',
         'click',
         'PIL',
         'imagehash',
         'pydantic',
         'yaml',
+        'rich',
+        'rich._unicode_data',
+        'gphotos_sorter',
+        'gphotos_sorter.cli',
+        'gphotos_sorter.config',
+        'gphotos_sorter.scanner',
+        'gphotos_sorter.scanner_mp',
+        'gphotos_sorter.db',
+        'gphotos_sorter.hash_utils',
+        'gphotos_sorter.metadata_utils',
+        'gphotos_sorter.date_utils',
     ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=['matplotlib'],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
-    cipher=block_cipher,
+    cipher=None,
     noarchive=False,
 )
 
-pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+pyz = PYZ(a.pure, a.zipped_data, cipher=None)
 
 exe = EXE(
     pyz,
