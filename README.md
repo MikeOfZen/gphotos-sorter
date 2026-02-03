@@ -51,7 +51,22 @@ choco install exiftool
 
 ### Install gphotos-sorter
 
-**Option 1: From PyPI (recommended)**
+**Option 1: Download pre-built executable (easiest)**
+
+Download the latest release for your platform from [GitHub Releases](https://github.com/MikeOfZen/gphotos-sorter/releases):
+
+- **Linux**: `gphotos-sorter-linux-amd64`
+- **macOS (Intel)**: `gphotos-sorter-macos-amd64`
+- **macOS (Apple Silicon)**: `gphotos-sorter-macos-arm64`
+- **Windows**: `gphotos-sorter-windows-amd64.exe`
+
+Make it executable (Linux/macOS):
+```bash
+chmod +x gphotos-sorter-*
+./gphotos-sorter-linux-amd64 --help
+```
+
+**Option 2: From PyPI**
 
 ```bash
 pip install gphotos-sorter
@@ -63,7 +78,7 @@ gphotos-sorter --version
 gphotos-sorter --help
 ```
 
-**Option 2: From GitHub (development version)**
+**Option 3: From GitHub (development version)**
 
 ```bash
 git clone https://github.com/MikeOfZen/gphotos-sorter.git
@@ -71,13 +86,13 @@ cd gphotos-sorter
 pip install .
 ```
 
-**Option 3: With uv (fast Python package manager)**
+**Option 4: With uv (fast Python package manager)**
 
 ```bash
 uv tool install gphotos-sorter
 ```
 
-**Option 4: Development setup**
+**Option 5: Development setup**
 
 ```bash
 git clone https://github.com/MikeOfZen/gphotos-sorter.git
