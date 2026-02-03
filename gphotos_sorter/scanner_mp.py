@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import multiprocessing as mp
+import os
 import shutil
 import tempfile
 from dataclasses import dataclass
@@ -419,7 +420,9 @@ def process_media_mp(
         # Pre-load known source paths to skip already-processed files
         logger.info("Loading known source paths from database...")
         database = MediaDatabase(db_path)
-        known_sources = database.get_all_source_paths()
+        raw_known_sources = database.get_all_source_paths()
+        # Normalize all paths for consistent comparison
+        known_sources = {os.path.normpath(p) for p in raw_known_sources}
         database.close()
         logger.info("Found %d known source paths", len(known_sources))
     
@@ -438,10 +441,18 @@ def process_media_mp(
         if not input_root.path.exists():
             logger.warning("Input root missing: %s", input_root.path)
             continue
+        debug_logged = 0
         for item in iter_work_items(input_root.path, input_root.owner, recursive=recursive, include_non_media=copy_non_media):
-            if str(item.path) in known_sources:
+            # Normalize path for consistent comparison with known_sources
+            normalized_path = os.path.normpath(str(item.path))
+            if normalized_path in known_sources:
                 skipped_known += 1
                 continue  # Skip already processed
+            # Debug log first few items to help diagnose path mismatches
+            if debug_logged < 3 and known_sources:
+                sample_known = next(iter(known_sources))
+                logger.debug("Path comparison - item: %r, sample known: %r", normalized_path, sample_known)
+                debug_logged += 1
             work_items.append(item)
             if item.is_media:
                 media_count += 1
