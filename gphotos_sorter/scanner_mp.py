@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import multiprocessing as mp
 import shutil
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -194,6 +195,7 @@ def worker_process(
     output_root = Path(config_dict["output_root"])
     layout = StorageLayout(config_dict["storage_layout"])
     copy_non_media = config_dict.get("copy_non_media", True)
+    dry_run = config_dict.get("dry_run", False)
     
     # Reconstruct FilenameFormat
     fmt = FilenameFormat(
@@ -222,13 +224,15 @@ def worker_process(
                 if not work_item.is_media:
                     if copy_non_media:
                         non_media_dir = output_root / work_item.owner / "non_media"
-                        non_media_dir.mkdir(parents=True, exist_ok=True)
+                        if not dry_run:
+                            non_media_dir.mkdir(parents=True, exist_ok=True)
                         dest = non_media_dir / work_item.path.name
                         counter = 0
-                        while dest.exists():
+                        while not dry_run and dest.exists():
                             counter += 1
                             dest = non_media_dir / f"{work_item.path.stem}_{counter}{work_item.path.suffix}"
-                        shutil.copy2(work_item.path, dest)
+                        if not dry_run:
+                            shutil.copy2(work_item.path, dest)
                         # Create a minimal record for non-media
                         record = MediaRecord(
                             similarity_hash=f"non_media:{work_item.path}",
@@ -267,23 +271,26 @@ def worker_process(
                 
                 date_taken, date_source = resolve_date(work_item.path, work_item.sidecar_path)
                 output_dir = build_output_dir(output_root, work_item.owner, date_taken, layout)
-                output_dir.mkdir(parents=True, exist_ok=True)
+                if not dry_run:
+                    output_dir.mkdir(parents=True, exist_ok=True)
                 canonical_path = find_unique_filename(output_dir, date_taken, work_item.tags, work_item.path.suffix, fmt)
                 
                 # Copy file
-                shutil.copy2(work_item.path, canonical_path)
+                if not dry_run:
+                    shutil.copy2(work_item.path, canonical_path)
                 
                 # Process sidecar and write EXIF
                 sidecar_extra = False
                 if work_item.sidecar_path:
                     sidecar = load_sidecar(work_item.sidecar_path)
                     if sidecar:
-                        try:
-                            sidecar_to_exif(canonical_path, sidecar, work_item.tags)
-                        except Exception:
-                            pass
+                        if not dry_run:
+                            try:
+                                sidecar_to_exif(canonical_path, sidecar, work_item.tags)
+                            except Exception:
+                                pass
                         sidecar_extra = sidecar_has_extras(sidecar)
-                        if sidecar_extra:
+                        if sidecar_extra and not dry_run:
                             target_sidecar = canonical_path.with_suffix(
                                 canonical_path.suffix + ".supplemental-metadata.json"
                             )
@@ -396,15 +403,25 @@ def process_media_mp(
     num_workers: int = 4,
 ) -> dict:
     """Process media files using multiprocessing."""
-    db_path = config.resolve_db_path()
-    db_path.parent.mkdir(parents=True, exist_ok=True)
     
-    # Pre-load known source paths to skip already-processed files
-    logger.info("Loading known source paths from database...")
-    database = MediaDatabase(db_path)
-    known_sources = database.get_all_source_paths()
-    database.close()
-    logger.info("Found %d known source paths", len(known_sources))
+    # In dry-run mode, use a temporary database
+    temp_db_file = None
+    if config.dry_run:
+        logger.info("DRY RUN MODE - using temporary database (will be deleted after run)")
+        temp_db_file = tempfile.NamedTemporaryFile(suffix=".sqlite", delete=False)
+        db_path = Path(temp_db_file.name)
+        temp_db_file.close()
+        known_sources = set()  # Empty set in dry-run
+    else:
+        db_path = config.resolve_db_path()
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Pre-load known source paths to skip already-processed files
+        logger.info("Loading known source paths from database...")
+        database = MediaDatabase(db_path)
+        known_sources = database.get_all_source_paths()
+        database.close()
+        logger.info("Found %d known source paths", len(known_sources))
     
     # Get config options
     copy_non_media = config.copy_non_media
@@ -462,6 +479,7 @@ def process_media_mp(
         "output_root": str(config.output_root),
         "storage_layout": config.storage_layout.value,
         "copy_non_media": copy_non_media,
+        "dry_run": config.dry_run,
         "fmt_include_time": fmt.include_time,
         "fmt_year_format": fmt.year_format.value,
         "fmt_month_format": fmt.month_format.value,
@@ -505,9 +523,9 @@ def process_media_mp(
     # Wait for workers to finish
     for p in workers:
         try:
-            p.terminate()
+            p.join(timeout=10)
         except (KeyboardInterrupt, BrokenPipeError):
-            pass
+            p.terminate()
     
     # Signal writer to stop and wait
     try:
@@ -516,9 +534,9 @@ def process_media_mp(
         pass
     
     try:
-        writer.terminate()
+        writer.join(timeout=10)
     except (KeyboardInterrupt, BrokenPipeError):
-        pass
+        writer.terminate()
     
     result = {
         "processed": stats_dict.get("processed", 0),
@@ -551,5 +569,13 @@ def process_media_mp(
     else:
         logger.warning("Validation MISMATCH: expected=%d, actual=%d", expected, actual)
     logger.info("============================================================")
+    
+    # Clean up temporary database in dry-run mode
+    if config.dry_run and temp_db_file:
+        try:
+            db_path.unlink(missing_ok=True)
+            logger.info("Temporary database cleaned up")
+        except Exception as e:
+            logger.warning("Failed to clean up temporary database: %s", e)
     
     return result
