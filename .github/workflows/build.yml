@@ -41,7 +41,17 @@ jobs:
 
       - name: Build executable
         run: |
-          pyinstaller --onefile --name ${{ matrix.asset_name }} gphotos_sorter/cli.py
+          pyinstaller gphotos-sorter.spec
+        shell: bash
+
+      - name: Rename executable (Unix)
+        if: runner.os != 'Windows'
+        run: mv dist/gphotos-sorter dist/${{ matrix.asset_name }}
+
+      - name: Rename executable (Windows)
+        if: runner.os == 'Windows'
+        run: move dist\gphotos-sorter.exe dist\${{ matrix.asset_name }}
+        shell: cmd
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -54,5 +64,15 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           files: dist/${{ matrix.asset_name }}*
+          body: |
+            ## Installation
+            
+            1. Download the executable for your platform
+            2. Make it executable (Linux/macOS): `chmod +x gphotos-sorter-*`
+            3. **Important**: Install [exiftool](https://exiftool.org/) separately:
+               - **Linux**: `sudo apt install libimage-exiftool-perl`
+               - **macOS**: `brew install exiftool`
+               - **Windows**: `choco install exiftool` or download from [exiftool.org](https://exiftool.org/)
+            4. Run: `./gphotos-sorter-* --help`
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
