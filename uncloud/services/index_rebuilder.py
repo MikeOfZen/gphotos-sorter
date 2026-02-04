@@ -54,6 +54,7 @@ class IndexRebuilder:
         progress: ProgressReporter,
         workers: int = 4,
         batch_size: int = 64,
+        write_hash: bool = False,
     ):
         """Initialize the rebuilder.
         
@@ -62,11 +63,13 @@ class IndexRebuilder:
             progress: Reporter for progress updates.
             workers: Number of parallel workers for hashing.
             batch_size: Number of records to batch before DB write (0=disable).
+            write_hash: If True, write computed hash to file metadata.
         """
         self._hash_engine = hash_engine
         self._progress = progress
         self._batch_size = batch_size
         self._workers = workers
+        self._write_hash = write_hash
     
     def scan_media_files(self, directory: Path) -> list[Path]:
         """Scan directory for media files.
@@ -206,6 +209,7 @@ class IndexRebuilder:
             
             First checks if hash is stored in file metadata (fast).
             If not found, computes hash (slow).
+            Optionally writes hash to metadata for faster future runs.
             Uses thread-local ExifTool daemon for efficiency.
             """
             try:
@@ -217,6 +221,14 @@ class IndexRebuilder:
                 
                 # Not in metadata, compute it
                 computed_hash = self._hash_engine.compute_hash(file_path)
+                
+                # Optionally write hash to file metadata for next time
+                if self._write_hash and computed_hash:
+                    try:
+                        daemon.write_hash(file_path, computed_hash)
+                    except Exception:
+                        pass  # Ignore write failures, hash is still computed
+                
                 return file_path, computed_hash, None, False
             except Exception as e:
                 return file_path, None, str(e), False

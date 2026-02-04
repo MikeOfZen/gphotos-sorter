@@ -387,6 +387,7 @@ def cmd_index(args: argparse.Namespace, reporter) -> int:
         progress=reporter,
         workers=args.workers,
         batch_size=args.batch_size,
+        write_hash=args.write_hash,
     )
     
     stats = rebuilder.rebuild(
