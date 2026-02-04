@@ -27,6 +27,9 @@ class RebuildStats:
     inserted: int = 0
     skipped_duplicates: int = 0
     errors: int = 0
+    from_metadata: int = 0
+    computed: int = 0
+    written_to_file: int = 0
     
     @property
     def success_rate(self) -> float:
@@ -198,14 +201,12 @@ class IndexRebuilder:
         stats = RebuildStats(total_files=len(media_files))
         duplicates: dict[str, list[Path]] = {}
         first_errors: list[tuple[Path, str | None]] = []
-        from_metadata_count = 0
-        computed_count = 0
         
         # Thread-local ExifTool daemons (one per worker thread)
         exiftool_daemons = ThreadLocalExifToolDaemon()
         
-        def hash_file(file_path: Path) -> tuple[Path, str | None, str | None, bool]:
-            """Hash a single file. Returns (path, hash, error_msg, from_metadata).
+        def hash_file(file_path: Path) -> tuple[Path, str | None, str | None, bool, bool]:
+            """Hash a single file. Returns (path, hash, error_msg, from_metadata, written).
             
             First checks if hash is stored in file metadata (fast).
             If not found, computes hash (slow).
@@ -217,21 +218,23 @@ class IndexRebuilder:
                 daemon = exiftool_daemons.get_daemon()
                 stored_hash = daemon.extract_hash(file_path)
                 if stored_hash:
-                    return file_path, stored_hash, None, True
+                    return file_path, stored_hash, None, True, False
                 
                 # Not in metadata, compute it
                 computed_hash = self._hash_engine.compute_hash(file_path)
                 
                 # Optionally write hash to file metadata for next time
+                written = False
                 if self._write_hash and computed_hash:
                     try:
-                        daemon.write_hash(file_path, computed_hash)
+                        if daemon.write_hash(file_path, computed_hash):
+                            written = True
                     except Exception:
                         pass  # Ignore write failures, hash is still computed
                 
-                return file_path, computed_hash, None, False
+                return file_path, computed_hash, None, False, written
             except Exception as e:
-                return file_path, None, str(e), False
+                return file_path, None, str(e), False, False
         
         # Start progress tracking
         self._progress.start_phase("Indexing", stats.total_files)
@@ -261,13 +264,15 @@ class IndexRebuilder:
                 
                 for future in done:
                     try:
-                        file_path, hash_value, err_msg, from_meta = future.result(timeout=0)
+                        file_path, hash_value, err_msg, from_meta, written = future.result(timeout=0)
                         completed += 1
                         
                         if from_meta:
-                            from_metadata_count += 1
+                            stats.from_metadata += 1
                         elif hash_value:
-                            computed_count += 1
+                            stats.computed += 1
+                            if written:
+                                stats.written_to_file += 1
                         
                         # Update progress bar with total completed
                         self._progress.update_phase(completed)
@@ -337,10 +342,12 @@ class IndexRebuilder:
         # End progress tracking
         self._progress.end_phase()
         
-        # Show summary
-        self._progress.info(
+        # Show detailed summary
+        self._progress.success(
             f"Indexed {stats.inserted} files "
-            f"({from_metadata_count} from metadata, {computed_count} computed)"
+            f"({stats.from_metadata} from metadata, "
+            f"{stats.computed} computed, "
+            f"{stats.written_to_file} written to file)"
         )
         
         # Report errors
