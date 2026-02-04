@@ -48,9 +48,13 @@ def _hash_item_worker(item_data: dict) -> dict:
     
     Takes and returns dicts for pickling across processes.
     """
+    import sys
     from pathlib import Path
     from ..engines.hash_engine import CPUHashEngine
     from ..engines.metadata import ExifToolMetadataExtractor
+    
+    # Suppress KeyboardInterrupt tracebacks in workers
+    sys.tracebacklimit = 0
     
     path = Path(item_data["path"])
     

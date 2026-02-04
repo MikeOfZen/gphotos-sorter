@@ -8,20 +8,16 @@ from __future__ import annotations
 import hashlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 from PIL import Image, ImageFile
 import imagehash
 
 from ..core.config import HashBackend
 
-# Try to import GPU dependencies
-try:
+if TYPE_CHECKING:
     import torch
     import torchvision.transforms.functional as TF
-    GPU_AVAILABLE = torch.cuda.is_available()
-except ImportError:
-    GPU_AVAILABLE = False
 
 # Allow loading truncated images
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -161,9 +157,6 @@ class GPUHashEngine:
     
     def _check_gpu_available(self) -> bool:
         """Check if GPU acceleration is available."""
-        if not GPU_AVAILABLE:
-            return False
-        
         try:
             import torch
             if self._backend == "cuda":
@@ -172,7 +165,7 @@ class GPUHashEngine:
                 # PyTorch doesn't directly support OpenCL, fallback to CPU
                 return False
             return False
-        except Exception:
+        except (ImportError, Exception):
             return False
     
     def compute_hash(self, path: Path) -> Optional[str]:
@@ -221,7 +214,7 @@ class GPUHashEngine:
     
     def _hash_image_gpu(self, path: Path) -> Optional[str]:
         """Compute perceptual hash for single image using GPU."""
-        if not GPU_AVAILABLE:
+        if not self._available:
             return self._cpu_fallback.compute_hash(path)
         
         try:
@@ -245,7 +238,7 @@ class GPUHashEngine:
     
     def _batch_hash_images_gpu(self, paths: list[Path], batch_size: int = 64) -> list[Optional[str]]:
         """Process images in batches on GPU."""
-        if not GPU_AVAILABLE:
+        if not self._available:
             return [self._cpu_fallback.compute_hash(p) for p in paths]
         
         import torch
