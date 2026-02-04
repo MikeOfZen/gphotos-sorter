@@ -51,37 +51,12 @@ class SQLiteMediaRepository:
         self._conn: Optional[sqlite3.Connection] = None
         self._init_database()
     
-    def _migrate_database(self, cursor: sqlite3.Cursor) -> None:
-        """Migrate old database schema to new version."""
-        # Check if media table exists
-        cursor.execute("""
-            SELECT name FROM sqlite_master 
-            WHERE type='table' AND name='media'
-        """)
-        if not cursor.fetchone():
-            return  # New database, no migration needed
-        
-        # Check if updated_at column exists
-        cursor.execute("PRAGMA table_info(media)")
-        columns = {row[1] for row in cursor.fetchall()}
-        
-        if 'updated_at' not in columns:
-            # Add updated_at column with default value
-            cursor.execute("""
-                ALTER TABLE media 
-                ADD COLUMN updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-            """)
-            self._conn.commit()
-    
     def _init_database(self) -> None:
         """Create tables if they don't exist."""
         self._conn = sqlite3.connect(str(self._db_path))
         self._conn.row_factory = sqlite3.Row
         
         cursor = self._conn.cursor()
-        
-        # Check if this is an old database and migrate if needed
-        self._migrate_database(cursor)
         
         # Main media table
         cursor.execute("""
