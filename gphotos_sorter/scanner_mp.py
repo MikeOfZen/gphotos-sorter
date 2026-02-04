@@ -270,20 +270,19 @@ def worker_process(
 
                 date_taken, date_source = resolve_date(work_item.path, work_item.sidecar_path)
                 width, height = get_image_resolution(work_item.path)
-                result_queue.put(
-                    HashResult(
-                        path=work_item.path,
-                        owner=work_item.owner,
-                        tags=work_item.tags,
-                        sidecar_path=work_item.sidecar_path,
-                        is_media=True,
-                        similarity_hash=similarity_hash,
-                        date_taken=date_taken,
-                        date_source=date_source,
-                        width=width,
-                        height=height,
-                    )
+                result = HashResult(
+                    path=work_item.path,
+                    owner=work_item.owner,
+                    tags=work_item.tags,
+                    sidecar_path=work_item.sidecar_path,
+                    is_media=True,
+                    similarity_hash=similarity_hash,
+                    date_taken=date_taken,
+                    date_source=date_source,
+                    width=width,
+                    height=height,
                 )
+                result_queue.put(result)
             except Exception as e:
                 result_queue.put(
                     HashResult(

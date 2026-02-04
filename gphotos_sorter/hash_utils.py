@@ -4,8 +4,11 @@ import hashlib
 from pathlib import Path
 from typing import Optional
 
-from PIL import Image
+from PIL import Image, ImageFile
 import imagehash
+
+# Allow loading truncated/incomplete images instead of raising exceptions
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif", ".tif", ".tiff", ".bmp"}
 
@@ -15,12 +18,21 @@ def is_image(path: Path) -> bool:
 
 
 def compute_hash(path: Path) -> Optional[str]:
+    """Compute perceptual hash for images, SHA256 for videos.
+    
+    Returns None if unable to compute hash (corrupt file, unsupported format, etc).
+    """
     try:
         if is_image(path):
+            # Set a reasonable decompression bomb limit (default is 89MB, we'll use 256MB)
+            Image.MAX_IMAGE_PIXELS = 256 * 1024 * 1024 // 4  # 256MB / 4 bytes per pixel
             with Image.open(path) as image:
+                # Force load to catch issues early
+                image.load()
                 return f"phash:{imagehash.phash(image)}"
         return f"sha256:{sha256_file(path)}"
     except Exception:
+        # Any error: corrupt file, unsupported format, too large, etc
         return None
 
 
