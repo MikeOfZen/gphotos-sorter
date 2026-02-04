@@ -40,3 +40,4 @@ htmlcov/
 # Project specific
 media.sqlite
 *.log
+.temp/
