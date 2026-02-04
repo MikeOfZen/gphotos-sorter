@@ -3,15 +3,15 @@ import pytest
 from pathlib import Path
 from PIL import Image
 
-from gphotos_sorter.core.models import MediaItem, HashResult, DuplicateGroup
-from gphotos_sorter.core.config import (
+from uncloud.core.models import MediaItem, HashResult, DuplicateGroup
+from uncloud.core.config import (
     OutputLayout,
     DuplicatePolicy,
     InputSource,
 )
-from gphotos_sorter.services.scanner import DirectoryScanner
-from gphotos_sorter.services.deduplicator import DuplicateResolver, verify_hash_collision
-from gphotos_sorter.services.file_ops import FileManager
+from uncloud.services.scanner import DirectoryScanner
+from uncloud.services.deduplicator import DuplicateResolver, verify_hash_collision
+from uncloud.services.file_ops import FileManager
 
 
 class TestDirectoryScanner:

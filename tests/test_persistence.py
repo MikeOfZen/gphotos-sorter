@@ -3,7 +3,7 @@ import pytest
 from pathlib import Path
 from datetime import datetime
 
-from gphotos_sorter.persistence.database import (
+from uncloud.persistence.database import (
     SQLiteMediaRepository,
     MediaRecord,
     PendingOperation,

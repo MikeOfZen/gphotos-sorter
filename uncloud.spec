@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec file for gphotos-sorter."""
+"""PyInstaller spec file for uncloud."""
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 # Collect rich unicode data files and submodules
@@ -7,7 +7,7 @@ rich_datas = collect_data_files('rich')
 rich_hiddenimports = collect_submodules('rich')
 
 a = Analysis(
-    ['run_gphotos_sorter.py'],
+    ['run_uncloud.py'],
     pathex=[],
     binaries=[],
     datas=rich_datas,
@@ -20,7 +20,7 @@ a = Analysis(
         'yaml',
         'rich',
         'rich._unicode_data',
-        'gphotos_sorter',
+        'uncloud',
         'gphotos_sorter.cli',
         'gphotos_sorter.config',
         'gphotos_sorter.scanner',
@@ -49,7 +49,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='gphotos-sorter',
+    name='uncloud',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

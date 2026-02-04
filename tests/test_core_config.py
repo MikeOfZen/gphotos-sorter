@@ -2,7 +2,7 @@
 import pytest
 from pathlib import Path
 
-from gphotos_sorter.core.config import (
+from uncloud.core.config import (
     OutputLayout,
     DuplicatePolicy,
     HashBackend,

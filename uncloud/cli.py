@@ -27,7 +27,7 @@ from .logging.rich_logger import RichProgressReporter, QuietProgressReporter
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        prog="gphotos-sorter",
+        prog="uncloud",
         description="Sort and deduplicate Google Photos exports.",
     )
     
@@ -108,7 +108,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         "--db",
         type=Path,
         default=None,
-        help="Path to database file (default: OUTPUT/.gphotos-sorter.db)",
+        help="Path to database file (default: OUTPUT/.uncloud.db)",
     )
     
     return parser.parse_args(argv)
@@ -167,7 +167,7 @@ def build_config(args: argparse.Namespace) -> SorterConfig:
     
     db_path = args.db
     if db_path is None:
-        db_path = args.output / ".gphotos-sorter.db"
+        db_path = args.output / ".uncloud.db"
     
     return SorterConfig(
         output_root=args.output,

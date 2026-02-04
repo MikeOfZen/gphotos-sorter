@@ -5,7 +5,7 @@ from datetime import datetime
 from PIL import Image
 import json
 
-from gphotos_sorter.engines.metadata import ExifToolMetadataExtractor
+from uncloud.engines.metadata import ExifToolMetadataExtractor
 
 
 class TestExifToolMetadataExtractor:

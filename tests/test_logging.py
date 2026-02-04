@@ -3,8 +3,8 @@ import pytest
 from pathlib import Path
 from io import StringIO
 
-from gphotos_sorter.logging.rich_logger import RichProgressReporter, QuietProgressReporter
-from gphotos_sorter.core.models import ProcessingStats
+from uncloud.logging.rich_logger import RichProgressReporter, QuietProgressReporter
+from uncloud.core.models import ProcessingStats
 
 
 class TestRichProgressReporter:

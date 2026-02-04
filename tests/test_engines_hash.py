@@ -3,7 +3,7 @@ import pytest
 from pathlib import Path
 from PIL import Image
 
-from gphotos_sorter.engines.hash_engine import (
+from uncloud.engines.hash_engine import (
     CPUHashEngine,
     GPUHashEngine,
     create_hash_engine,
@@ -13,7 +13,7 @@ from gphotos_sorter.engines.hash_engine import (
     IMAGE_EXTENSIONS,
     VIDEO_EXTENSIONS,
 )
-from gphotos_sorter.core.config import HashBackend
+from uncloud.core.config import HashBackend
 
 
 class TestMediaDetection:

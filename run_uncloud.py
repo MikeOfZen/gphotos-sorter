@@ -6,5 +6,5 @@ from pathlib import Path
 package_root = Path(__file__).parent
 
 if __name__ == "__main__":
-    from gphotos_sorter.cli import main
+    from uncloud.cli import main
     main()

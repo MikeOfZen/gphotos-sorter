@@ -3,7 +3,7 @@ import pytest
 from datetime import datetime
 from pathlib import Path
 
-from gphotos_sorter.core.models import (
+from uncloud.core.models import (
     ProcessingAction,
     DuplicateResolution,
     MediaItem,
