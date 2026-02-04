@@ -77,10 +77,11 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     
     # Processing options
     parser.add_argument(
-        "-j", "--jobs",
+        "-w", "-j", "--workers",
+        dest="workers",
         type=int,
         default=None,
-        help="Number of parallel jobs (default: CPU count)",
+        help="Number of parallel workers (default: CPU count)",
     )
     parser.add_argument(
         "--batch-size",
@@ -178,7 +179,7 @@ def build_config(args: argparse.Namespace) -> SorterConfig:
         layout=layout_from_string(args.layout),
         duplicate_policy=policy_from_string(args.duplicates),
         hash_backend=backend_from_string(args.hash_backend),
-        workers=args.jobs or 4,
+        workers=args.workers or 4,
         batch_size=args.batch_size,
         dry_run=args.dry_run,
         db_path=db_path,
