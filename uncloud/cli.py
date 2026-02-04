@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import argparse
+import atexit
+import os
+import signal
 import sys
 from pathlib import Path
 from typing import Optional
@@ -219,6 +222,12 @@ def create_dependencies(
 
 def main(argv: Optional[list[str]] = None) -> int:
     """Main entry point."""
+    from .services.processor import _signal_handler
+    
+    # Setup signal handlers for fast shutdown
+    signal.signal(signal.SIGINT, _signal_handler)
+    signal.signal(signal.SIGTERM, _signal_handler)
+    
     args = parse_args(argv)
     
     # Create reporter based on verbosity settings

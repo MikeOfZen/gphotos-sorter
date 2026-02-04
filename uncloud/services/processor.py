@@ -230,7 +230,8 @@ class MediaProcessor:
         results: list[HashResult] = []
         
         # Use ProcessPoolExecutor for true parallelism
-        with ProcessPoolExecutor(max_workers=self._config.workers) as executor:
+        executor = ProcessPoolExecutor(max_workers=self._config.workers)
+        try:
             futures = {
                 executor.submit(_hash_item_worker, item_dict): i
                 for i, item_dict in enumerate(item_dicts)
@@ -240,9 +241,8 @@ class MediaProcessor:
             for future in as_completed(futures):
                 # Check for interrupt
                 if _interrupted:
-                    # Cancel pending futures
-                    for f in futures:
-                        f.cancel()
+                    # Shutdown executor immediately
+                    executor.shutdown(wait=False)
                     raise KeyboardInterrupt()
                 
                 try:
@@ -258,6 +258,8 @@ class MediaProcessor:
                 
                 completed += 1
                 self._deps.progress.update_phase(completed)
+        finally:
+            executor.shutdown(wait=False)
         
         self._deps.progress.info(f"Hashed {len(results)} files")
         self._deps.progress.end_phase()
