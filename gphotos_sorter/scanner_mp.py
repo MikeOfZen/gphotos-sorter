@@ -618,7 +618,7 @@ def process_media_mp(
     last_progress = 0
     
     # Process results while feeding work items to avoid queue deadlock
-    while collected < expected_results or items_sent < len(work_items):
+    while collected < expected_results:
         # Try to send more work items (non-blocking)
         while work_index < len(work_items):
             try:
