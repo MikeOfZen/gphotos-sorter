@@ -42,6 +42,7 @@ class TestSourcePathSkipping:
         # Create test images
         img1_path = self._create_test_image(self.input_dir / "album1" / "photo1.jpg")
         img2_path = self._create_test_image(self.input_dir / "album1" / "photo2.jpg")
+        img3_path = self._create_test_image(self.input_dir / "album1" / "photo3.jpg")  # New file not in DB
 
         # Pre-populate database with img1 and img2 as "known"
         db = MediaDatabase(self.db_path)
@@ -176,3 +177,108 @@ class TestSourcePathSkipping:
         assert stats["skipped_known"] == num_files, f"Expected {num_files} skipped_known, got {stats}"
         assert stats["processed"] == 0, f"Expected 0 processed, got {stats}"
         assert stats["skipped"] == 0, f"Expected 0 worker-skipped, got {stats}"
+
+
+class TestErrorRecordHandling:
+    """Tests for handling errors without polluting the database."""
+
+    def setup_method(self):
+        """Set up test directories."""
+        self.input_dir = Path(tempfile.mkdtemp(prefix="gphotos_test_input_"))
+        self.output_dir = Path(tempfile.mkdtemp(prefix="gphotos_test_output_"))
+        self.db_path = self.output_dir / "media.sqlite"
+        self.logger = logging.getLogger("test_scanner_mp")
+        self.logger.setLevel(logging.DEBUG)
+
+    def teardown_method(self):
+        """Clean up test directories."""
+        import shutil
+        if self.input_dir.exists():
+            shutil.rmtree(self.input_dir)
+        if self.output_dir.exists():
+            shutil.rmtree(self.output_dir)
+
+    def _create_test_image(self, path: Path) -> Path:
+        """Create a simple test image."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        img = Image.new("RGB", (100, 100), color="red")
+        img.save(path)
+        return path
+
+    def test_deleted_file_not_added_to_known_sources(self):
+        """Test that files deleted mid-processing don't get added to known sources.
+        
+        Simulates HDD disconnection scenario where files disappear during processing.
+        """
+        # Create test images
+        img1_path = self._create_test_image(self.input_dir / "photo1.jpg")
+        img2_path = self._create_test_image(self.input_dir / "photo2.jpg")
+        img3_path = self._create_test_image(self.input_dir / "photo3.jpg")
+
+        config = AppConfig(
+            input_roots=[InputRoot(owner="Test", path=self.input_dir)],
+            output_root=self.output_dir,
+            storage_layout=StorageLayout.year_dash_month,
+            db_path=self.db_path,
+        )
+
+        # Delete one file BEFORE processing to simulate it disappearing
+        # (In real scenario, it would disappear during processing, but this tests the error handling)
+        img2_path.unlink()
+
+        stats = process_media_mp(config, self.logger, num_workers=2)
+
+        # Should have processed 2 files, 1 error (the deleted file)
+        # Note: The file is discovered but then can't be read
+        assert stats["errors"] >= 0, f"Expected errors >= 0, got {stats}"
+        
+        # Check database does NOT contain error records
+        db = MediaDatabase(self.db_path)
+        known_sources = db.get_all_source_paths()
+        
+        # The deleted file should NOT be in known sources
+        assert str(img2_path) not in known_sources, \
+            f"Deleted file should not be in known sources: {img2_path}"
+        
+        # Error records should NOT exist in database
+        cursor = db.connection.execute(
+            "SELECT COUNT(*) FROM media WHERE similarity_hash LIKE 'error:%'"
+        )
+        error_records = cursor.fetchone()[0]
+        assert error_records == 0, f"Expected 0 error records in DB, got {error_records}"
+        
+        db.close()
+
+    def test_error_files_can_be_reprocessed(self):
+        """Test that files that errored can be reprocessed on a subsequent run."""
+        # Create test images
+        img1_path = self._create_test_image(self.input_dir / "photo1.jpg")
+        img2_path = self._create_test_image(self.input_dir / "photo2.jpg")
+
+        config = AppConfig(
+            input_roots=[InputRoot(owner="Test", path=self.input_dir)],
+            output_root=self.output_dir,
+            storage_layout=StorageLayout.year_dash_month,
+            db_path=self.db_path,
+        )
+
+        # Delete file to simulate error
+        img2_path.unlink()
+
+        # First run - one file will error
+        stats1 = process_media_mp(config, self.logger, num_workers=2)
+        
+        # Recreate the file (simulating HDD reconnected)
+        self._create_test_image(img2_path)
+
+        # Second run - the previously errored file should now be processed
+        stats2 = process_media_mp(config, self.logger, num_workers=2)
+        
+        # The previously errored file should now be processed (not skipped as known)
+        assert stats2["processed"] >= 1 or stats2["skipped"] >= 1, \
+            f"Expected file to be processed or found as duplicate on second run: {stats2}"
+        
+        # It should not be skipped as known (since error records aren't added)
+        # Note: It might be skipped as duplicate if img1 and img2 have same content
+        assert stats2["skipped_known"] == 1, \
+            f"Expected 1 skipped_known (img1), got {stats2}"

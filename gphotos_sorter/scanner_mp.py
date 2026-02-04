@@ -364,7 +364,8 @@ def writer_process(
             
             if result.action == "error":
                 errors += 1
-                database.upsert(result.record)
+                # DON'T add error records to database - file might be temporarily unavailable
+                # On next run, we'll try again since the source path won't be in known_sources
             elif result.action == "non_media":
                 non_media += 1
                 # Don't add non-media to DB, just track count

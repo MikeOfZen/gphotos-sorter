@@ -312,18 +312,8 @@ def process_media(config: AppConfig, logger: logging.Logger, limit: Optional[int
                     similarity_hash = compute_hash(media.path)
                     if not similarity_hash:
                         logger.error("Hash failed: %s", media.path)
-                        record = MediaRecord(
-                            similarity_hash=f"error:{media.path}",
-                            canonical_path="",
-                            owner=media.owner,
-                            date_taken=None,
-                            date_source="error",
-                            tags=media.tags,
-                            source_paths=[str(media.path)],
-                            status="error",
-                            notes="hash_failed",
-                        )
-                        database.upsert(record)
+                        # DON'T add to database - file might be temporarily unavailable
+                        # On next run, we'll try again
                         stats["errors"] += 1
                         stats["error_details"].append(f"Hash failed: {media.path}")
                         continue

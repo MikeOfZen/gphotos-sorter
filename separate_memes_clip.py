@@ -60,68 +60,73 @@ class ImageClassifier:
         print(f"Model loaded successfully!")
     
     def classify_image(self, image_path: str) -> Tuple[str, float, dict]:
-    """
-    Classify an image using CLIP zero-shot classification.
-    
-    Args:
-        image_path: Path to the image file
-        model: CLIP model
-        processor: CLIP processor
-        device: torch device (cuda/cpu)
-        text_prompts: List of text descriptions for classification
+        """
+        Classify an image as photo or meme.
         
-    Returns:
-        tuple: (predicted_class_index, confidence, all_probabilities)
-    """
-    try:
-        img = Image.open(image_path)
-        
-        # Convert to RGB if necessary
-        if img.mode != 'RGB':
-            img = img.convert('RGB')
-        
-        # Prepare inputs
-        inputs = processor(
-            text=text_prompts,
-            images=img,
-            return_tensors="pt",
-            padding=True
-        ).to(device)
-        
-        # Get predictions
-        with torch.no_grad():
-            outputs = model(**inputs)
-            logits_per_image = outputs.logits_per_image
-            probs = logits_per_image.softmax(dim=1)
-        
-        # Get predicted class
-        predicted_idx = probs.argmax().item()
-        confidence = probs[0][predicted_idx].item()
-        all_probs = probs[0].cpu().numpy().tolist()
-        
-        return predicted_idx, confidence, all_probs
-        
-    except Exception as e:
-        print(f"Error processing {image_path}: {e}")
-        return -1, 0.0, []
+        Args:
+            image_path: Path to the image file
+            
+        Returns:
+            Tuple of (category, confidence, all_scores)
+        """
+        try:
+            # Load and preprocess image
+            image = Image.open(image_path).convert('RGB')
+            
+            # Flatten all prompts
+            all_prompts = self.categories["photo"] + self.categories["meme"]
+            
+            # Run inference
+            inputs = self.processor(
+                text=all_prompts, 
+                images=image, 
+                return_tensors="pt", 
+                padding=True
+            ).to(self.device)
+            
+            with torch.no_grad():
+                outputs = self.model(**inputs)
+                logits_per_image = outputs.logits_per_image
+                probs = logits_per_image.softmax(dim=1)[0]
+            
+            # Calculate category scores
+            photo_score = probs[:len(self.categories["photo"])].mean().item()
+            meme_score = probs[len(self.categories["photo"]):].mean().item()
+            
+            # Determine category
+            if meme_score > photo_score:
+                category = "meme"
+                confidence = meme_score
+            else:
+                category = "photo"
+                confidence = photo_score
+            
+            scores = {
+                "photo": photo_score,
+                "meme": meme_score
+            }
+            
+            return category, confidence, scores
+            
+        except Exception as e:
+            print(f"Error classifying {image_path}: {e}")
+            return "unknown", 0.0, {}
 
 
 def separate_whatsapp_images(
-    source_dir: str,
-    model_name: str = "openai/clip-vit-base-patch32",
-    confidence_threshold: float = 0.55,
+    source_dir: str, 
     dry_run: bool = False,
-    verbose: bool = False
+    threshold: float = 0.5,
+    model_name: str = "openai/clip-vit-base-patch32"
 ):
     """
-    Separate WhatsApp images into photos and memes using CLIP.
+    Separate WhatsApp images into memes and photos subdirectories using CLIP.
     
     Args:
         source_dir: Directory containing WhatsApp images
-        model_name: HuggingFace CLIP model to use
-        confidence_threshold: Minimum confidence to classify (otherwise 'uncertain')
         dry_run: If True, only analyze without moving files
-        verbose: Print details for each image
+        threshold: Confidence threshold (0.0-1.0) for classification
+        model_name: HuggingFace model to use
     """
     source_path = Path(source_dir)
     
@@ -129,21 +134,8 @@ def separate_whatsapp_images(
         print(f"Error: Directory not found: {source_dir}")
         return
     
-    # Setup CLIP model
-    model, processor, device = setup_clip_model(model_name)
-    
-    # Define classification prompts
-    # These can be customized based on your specific needs
-    text_prompts = [
-        "a family photo, a personal photograph, a selfie, people in real life, vacation photo",
-        "a meme with text overlay, an internet meme, a screenshot with text, a funny image with captions"
-    ]
-    
-    print("Classification categories:")
-    print(f"  [0] PHOTOS: {text_prompts[0]}")
-    print(f"  [1] MEMES:  {text_prompts[1]}")
-    print(f"\nConfidence threshold: {confidence_threshold:.0%}")
-    print(f"(Images below threshold will be placed in 'uncertain' folder)\n")
+    # Initialize classifier
+    classifier = ImageClassifier(model_name=model_name)
     
     # Create subdirectories
     photos_dir = source_path / "photos"
@@ -154,6 +146,10 @@ def separate_whatsapp_images(
         photos_dir.mkdir(exist_ok=True)
         memes_dir.mkdir(exist_ok=True)
         uncertain_dir.mkdir(exist_ok=True)
+        print(f"\nCreated subdirectories:")
+        print(f"  - {photos_dir}")
+        print(f"  - {memes_dir}")
+        print(f"  - {uncertain_dir}")
     
     # Get all image files
     image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'}
@@ -162,100 +158,109 @@ def separate_whatsapp_images(
         if f.is_file() and f.suffix.lower() in image_extensions
     ]
     
-    print(f"Found {len(image_files)} images to process\n")
+    print(f"\nFound {len(image_files)} images to process")
     
     if not image_files:
         print("No images found!")
         return
     
-    # Statistics
+    # Process images
     meme_count = 0
     photo_count = 0
     uncertain_count = 0
     error_count = 0
     
-    # Process each image
-    print("Analyzing images with AI...")
-    for image_file in tqdm(image_files, desc="Classifying"):
-        predicted_class, confidence, probs = classify_image_clip(
-            str(image_file), model, processor, device, text_prompts
-        )
-        
-        if predicted_class == -1:
+    print("\nClassifying images using CLIP model...")
+    print(f"Confidence threshold: {threshold}")
+    
+    results = []
+    
+    for img_file in tqdm(image_files, desc="Processing"):
+        try:
+            category, confidence, scores = classifier.classify_image(str(img_file))
+            
+            # Determine destination based on confidence
+            if category == "unknown":
+                destination = uncertain_dir / img_file.name
+                category_label = "error"
+                error_count += 1
+            elif confidence < threshold:
+                destination = uncertain_dir / img_file.name
+                category_label = "uncertain"
+                uncertain_count += 1
+            elif category == "meme":
+                destination = memes_dir / img_file.name
+                category_label = "meme"
+                meme_count += 1
+            else:
+                destination = photos_dir / img_file.name
+                category_label = "photo"
+                photo_count += 1
+            
+            results.append({
+                'file': img_file.name,
+                'category': category_label,
+                'confidence': confidence,
+                'scores': scores
+            })
+            
+            if dry_run:
+                # Just print what would happen
+                tqdm.write(
+                    f"[{category_label:9s}] {img_file.name:40s} "
+                    f"(conf: {confidence:.2f}, photo: {scores.get('photo', 0):.2f}, "
+                    f"meme: {scores.get('meme', 0):.2f})"
+                )
+            else:
+                # Move the file
+                shutil.move(str(img_file), str(destination))
+                
+        except Exception as e:
             error_count += 1
-            continue
-        
-        # Determine destination based on prediction and confidence
-        if confidence < confidence_threshold:
-            dest_dir = uncertain_dir
-            category = "uncertain"
-            uncertain_count += 1
-        elif predicted_class == 0:
-            dest_dir = photos_dir
-            category = "photo"
-            photo_count += 1
-        else:
-            dest_dir = memes_dir
-            category = "meme"
-            meme_count += 1
-        
-        if verbose or dry_run:
-            tqdm.write(
-                f"[{category.upper():9s}] {image_file.name:40s} "
-                f"(confidence: {confidence:.1%}, photo: {probs[0]:.1%}, meme: {probs[1]:.1%})"
-            )
-        
-        if not dry_run:
-            dest_path = dest_dir / image_file.name
-            shutil.move(str(image_file), str(dest_path))
+            tqdm.write(f"Error processing {img_file.name}: {e}")
     
     # Print summary
     print("\n" + "="*70)
     print("SUMMARY")
     print("="*70)
-    print(f"Photos (family/personal):    {photo_count:4d}  ({photo_count/len(image_files)*100:.1f}%)")
-    print(f"Memes (text/screenshots):    {meme_count:4d}  ({meme_count/len(image_files)*100:.1f}%)")
-    print(f"Uncertain (low confidence):  {uncertain_count:4d}  ({uncertain_count/len(image_files)*100:.1f}%)")
-    if error_count > 0:
-        print(f"Errors:                      {error_count:4d}")
-    print(f"{'─'*70}")
-    print(f"Total processed:             {len(image_files):4d}")
+    print(f"Photos:               {photo_count:4d} ({photo_count/len(image_files)*100:.1f}%)")
+    print(f"Memes:                {meme_count:4d} ({meme_count/len(image_files)*100:.1f}%)")
+    print(f"Uncertain:            {uncertain_count:4d} ({uncertain_count/len(image_files)*100:.1f}%)")
+    print(f"Errors:               {error_count:4d}")
+    print(f"Total processed:      {len(image_files):4d}")
     
     if dry_run:
-        print("\n[DRY RUN] No files were moved.")
-        print("Run without --dry-run to apply changes.")
+        print("\n[DRY RUN] No files were moved. Run without --dry-run to apply changes.")
     else:
         print(f"\nFiles organized into:")
-        print(f"  ✓ {photos_dir}")
-        print(f"  ✓ {memes_dir}")
-        if uncertain_count > 0:
-            print(f"  ⚠ {uncertain_dir} (review these manually)")
+        print(f"  - {photos_dir} ({photo_count} files)")
+        print(f"  - {memes_dir} ({meme_count} files)")
+        print(f"  - {uncertain_dir} ({uncertain_count} files)")
+        print(f"\nReview the 'uncertain' folder and manually sort those images.")
 
 
 def main():
     import argparse
     
     parser = argparse.ArgumentParser(
-        description='Separate WhatsApp images using AI (CLIP model) - GPU accelerated',
+        description='Separate WhatsApp images into memes and photos using CLIP ML model',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   # Dry run to see what would happen
   %(prog)s "/path/to/WhatsApp Images" --dry-run
   
-  # Actually move files
+  # Actually move files with default settings
   %(prog)s "/path/to/WhatsApp Images"
   
   # Use larger model for better accuracy
   %(prog)s "/path/to/WhatsApp Images" --model openai/clip-vit-large-patch14
   
-  # Lower confidence threshold (more aggressive classification)
-  %(prog)s "/path/to/WhatsApp Images" --confidence 0.4
+  # Adjust confidence threshold
+  %(prog)s "/path/to/WhatsApp Images" --threshold 0.6
   
-Available models:
-  - openai/clip-vit-base-patch32 (default, fast, 400MB)
-  - openai/clip-vit-large-patch14 (better accuracy, slower, 1.7GB)
-  - google/siglip-so400m-patch14-384 (newer, good balance)
+  # Use CPU instead of GPU
+  %(prog)s "/path/to/WhatsApp Images" --device cpu
         """
     )
     
@@ -263,39 +268,51 @@ Available models:
         'directory',
         help='Path to WhatsApp Images directory'
     )
-    
-    parser.add_argument(
-        '--model',
-        default='openai/clip-vit-base-patch32',
-        help='CLIP model to use (default: openai/clip-vit-base-patch32)'
-    )
-    
-    parser.add_argument(
-        '--confidence',
-        type=float,
-        default=0.55,
-        help='Minimum confidence threshold 0-1 (default: 0.55)'
-    )
-    
     parser.add_argument(
         '--dry-run',
         action='store_true',
         help='Analyze only, do not move files'
     )
-    
     parser.add_argument(
-        '--verbose',
-        action='store_true',
-        help='Print classification details for each image'
+        '--threshold',
+        type=float,
+        default=0.5,
+        help='Confidence threshold for classification (0.0-1.0, default: 0.5)'
+    )
+    parser.add_argument(
+        '--model',
+        default='openai/clip-vit-base-patch32',
+        help='CLIP model to use (default: openai/clip-vit-base-patch32)'
+    )
+    parser.add_argument(
+        '--device',
+        choices=['cuda', 'cpu', 'auto'],
+        default='auto',
+        help='Device to use for inference (default: auto)'
     )
     
     args = parser.parse_args()
     
-    # Validate confidence threshold
-    if not 0 <= args.confidence <= 1:
-        print("Error: Confidence threshold must be between 0 and 1")
-        sys.exit(1)
+    # Check CUDA availability
+    if args.device == 'cuda' and not torch.cuda.is_available():
+        print("Warning: CUDA requested but not available. Falling back to CPU.")
+        device = 'cpu'
+    elif args.device == 'auto':
+        device = None
+    else:
+        device = args.device
     
+    separate_whatsapp_images(
+        args.directory, 
+        dry_run=args.dry_run,
+        threshold=args.threshold,
+        model_name=args.model
+    )
+
+
+if __name__ == '__main__':
+    main()
+
     separate_whatsapp_images(
         source_dir=args.directory,
         model_name=args.model,
