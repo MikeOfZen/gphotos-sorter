@@ -621,6 +621,7 @@ def process_media_mp(
     hash_results: list[HashResult] = []
     expected_results = len(work_items)
     collected = 0
+    last_progress = 0
     while collected < expected_results:
         try:
             result: HashResult = hash_result_queue.get(timeout=1)
@@ -628,6 +629,11 @@ def process_media_mp(
             continue
         hash_results.append(result)
         collected += 1
+        # Log progress every 100 files or 10%
+        if collected - last_progress >= 100 or (collected * 10 // expected_results) > (last_progress * 10 // expected_results):
+            pct = collected * 100 // expected_results
+            logger.info("Phase 1 progress: %d/%d (%d%%) hashed", collected, expected_results, pct)
+            last_progress = collected
 
     for p in hash_workers:
         try:
@@ -809,12 +815,18 @@ def process_media_mp(
 
     expected_copy_results = len(copy_plans) + len(non_media_plans)
     collected = 0
+    last_progress = 0
     while collected < expected_copy_results:
         try:
             result: CopyResult = copy_result_queue.get(timeout=1)
         except Empty:
             continue
         collected += 1
+        # Log progress every 100 files or 10%
+        if collected - last_progress >= 100 or (expected_copy_results > 0 and (collected * 10 // expected_copy_results) > (last_progress * 10 // expected_copy_results)):
+            pct = collected * 100 // expected_copy_results if expected_copy_results > 0 else 100
+            logger.info("Phase 2 progress: %d/%d (%d%%) copied", collected, expected_copy_results, pct)
+            last_progress = collected
         if result.action == "insert":
             if database:
                 database.upsert(result.record)
