@@ -120,3 +120,151 @@ class TestExifToolBatchMode:
         result = batch_extractor.write_tags(path, {"Artist": "Test"})
         # Result may be True or False depending on exiftool availability
         assert isinstance(result, bool)
+
+
+class TestExifToolDaemon:
+    """Tests for persistent ExifTool daemon."""
+    
+    @pytest.fixture
+    def test_image(self, tmp_path: Path) -> Path:
+        """Create a test image."""
+        path = tmp_path / "test.jpg"
+        img = Image.new("RGB", (100, 100), color="red")
+        img.save(path, "JPEG")
+        return path
+    
+    def test_daemon_creation(self):
+        """Test daemon can be created."""
+        from uncloud.engines.metadata import ExifToolDaemon
+        
+        daemon = ExifToolDaemon()
+        try:
+            # Daemon should be alive if exiftool is available
+            # or not alive if exiftool is not installed
+            assert isinstance(daemon.is_alive, bool)
+        finally:
+            daemon.close()
+    
+    def test_daemon_extract_hash_no_hash(self, test_image):
+        """Test extracting hash from file without uncloud metadata."""
+        from uncloud.engines.metadata import ExifToolDaemon
+        
+        daemon = ExifToolDaemon()
+        try:
+            if daemon.is_alive:
+                result = daemon.extract_hash(test_image)
+                # Fresh image has no hash
+                assert result is None
+        finally:
+            daemon.close()
+    
+    def test_daemon_write_and_extract_hash(self, test_image):
+        """Test writing and reading hash with daemon."""
+        from uncloud.engines.metadata import ExifToolDaemon
+        
+        daemon = ExifToolDaemon()
+        try:
+            if daemon.is_alive:
+                # Write hash
+                success = daemon.write_hash(test_image, "phash:abc123")
+                assert success is True
+                
+                # Read hash back
+                result = daemon.extract_hash(test_image)
+                assert result == "phash:abc123"
+        finally:
+            daemon.close()
+    
+    def test_daemon_context_manager(self):
+        """Test daemon as context manager."""
+        from uncloud.engines.metadata import ExifToolDaemon
+        
+        with ExifToolDaemon() as daemon:
+            assert isinstance(daemon.is_alive, bool)
+        # After exit, daemon should be closed
+    
+    def test_daemon_close_idempotent(self):
+        """Test closing daemon multiple times is safe."""
+        from uncloud.engines.metadata import ExifToolDaemon
+        
+        daemon = ExifToolDaemon()
+        daemon.close()
+        daemon.close()  # Should not raise
+        daemon.close()  # Should not raise
+
+
+class TestThreadLocalExifToolDaemon:
+    """Tests for thread-local ExifTool daemon storage."""
+    
+    def test_get_daemon(self):
+        """Test getting daemon for current thread."""
+        from uncloud.engines.metadata import ThreadLocalExifToolDaemon
+        
+        storage = ThreadLocalExifToolDaemon()
+        try:
+            daemon = storage.get_daemon()
+            # Should return a daemon
+            assert daemon is not None
+            
+            # Same thread should get same daemon
+            daemon2 = storage.get_daemon()
+            assert daemon is daemon2
+        finally:
+            storage.close_all()
+    
+    def test_different_threads_get_different_daemons(self):
+        """Test that different threads get different daemons."""
+        from uncloud.engines.metadata import ThreadLocalExifToolDaemon
+        import threading
+        
+        storage = ThreadLocalExifToolDaemon()
+        daemons = []
+        
+        def get_daemon():
+            daemons.append(storage.get_daemon())
+        
+        try:
+            # Get daemon in main thread
+            main_daemon = storage.get_daemon()
+            
+            # Get daemon in another thread
+            thread = threading.Thread(target=get_daemon)
+            thread.start()
+            thread.join()
+            
+            # Should be different daemons
+            assert len(daemons) == 1
+            assert daemons[0] is not main_daemon
+        finally:
+            storage.close_all()
+    
+    def test_close_all(self):
+        """Test closing all daemons."""
+        from uncloud.engines.metadata import ThreadLocalExifToolDaemon
+        import threading
+        
+        storage = ThreadLocalExifToolDaemon()
+        
+        def get_daemon():
+            storage.get_daemon()
+        
+        # Create daemons in multiple threads
+        threads = []
+        for _ in range(3):
+            t = threading.Thread(target=get_daemon)
+            threads.append(t)
+            t.start()
+        
+        for t in threads:
+            t.join()
+        
+        # Also get one in main thread
+        storage.get_daemon()
+        
+        # Close all - should not raise
+        storage.close_all()
+        
+        # Getting daemon after close should still work
+        daemon = storage.get_daemon()
+        assert daemon is not None
+        storage.close_all()

@@ -161,3 +161,78 @@ class TestQuietProgressReporter:
         """Test using as context manager."""
         with QuietProgressReporter() as reporter:
             reporter.info("Inside context")
+
+
+class TestFilesPerSecondColumn:
+    """Tests for files/second progress column."""
+    
+    def test_column_creation(self):
+        """Test column can be created."""
+        from uncloud.logging.rich_logger import FilesPerSecondColumn
+        
+        col = FilesPerSecondColumn()
+        assert col is not None
+        assert col._window_size == 10
+    
+    def test_column_custom_window_size(self):
+        """Test column with custom window size."""
+        from uncloud.logging.rich_logger import FilesPerSecondColumn
+        
+        col = FilesPerSecondColumn(window_size=5)
+        assert col._window_size == 5
+    
+    def test_column_render_initial(self):
+        """Test initial render shows placeholder."""
+        from uncloud.logging.rich_logger import FilesPerSecondColumn
+        from rich.progress import Task
+        
+        col = FilesPerSecondColumn()
+        
+        # Create a mock task
+        task = Task(
+            id=0,
+            description="Test",
+            total=100,
+            completed=0,
+            _get_time=lambda: 0,
+            visible=True,
+            fields={},
+        )
+        
+        result = col.render(task)
+        assert "f/s" in result.plain
+    
+    def test_column_render_with_progress(self):
+        """Test render with progress updates."""
+        from uncloud.logging.rich_logger import FilesPerSecondColumn
+        from rich.progress import Task
+        import time
+        
+        col = FilesPerSecondColumn()
+        
+        # Create a mock task - first render
+        task1 = Task(
+            id=0,
+            description="Test",
+            total=100,
+            completed=0,
+            _get_time=lambda: 0,
+            visible=True,
+            fields={},
+        )
+        col.render(task1)
+        
+        # Simulate time passing and progress
+        time.sleep(0.01)  # Small delay to get different timestamp
+        
+        task2 = Task(
+            id=0,
+            description="Test",
+            total=100,
+            completed=10,
+            _get_time=lambda: 0,
+            visible=True,
+            fields={},
+        )
+        result = col.render(task2)
+        assert "f/s" in result.plain

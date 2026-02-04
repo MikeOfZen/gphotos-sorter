@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import sys
+import time
+from collections import deque
 from pathlib import Path
 from typing import Optional
 
 from rich.console import Console
 from rich.progress import (
     Progress,
+    ProgressColumn,
     SpinnerColumn,
     TextColumn,
     BarColumn,
@@ -15,12 +18,65 @@ from rich.progress import (
     TimeElapsedColumn,
     MofNCompleteColumn,
     TaskID,
+    Task,
 )
 from rich.table import Table
 from rich.panel import Panel
 from rich.text import Text
 
 from ..core.models import ProcessingStats
+
+
+class FilesPerSecondColumn(ProgressColumn):
+    """Renders files per second as a rolling average."""
+    
+    def __init__(self, window_size: int = 10):
+        """Initialize with rolling window size.
+        
+        Args:
+            window_size: Number of samples for rolling average.
+        """
+        super().__init__()
+        self._window_size = window_size
+        self._samples: deque[tuple[float, int]] = deque(maxlen=window_size)
+        self._last_completed = 0
+        self._start_time: Optional[float] = None
+    
+    def render(self, task: Task) -> Text:
+        """Render the speed column."""
+        completed = int(task.completed)
+        current_time = time.time()
+        
+        # Initialize on first call
+        if self._start_time is None:
+            self._start_time = current_time
+            self._last_completed = completed
+            return Text("-- f/s", style="magenta")
+        
+        # Record sample if progress changed
+        if completed > self._last_completed:
+            self._samples.append((current_time, completed))
+            self._last_completed = completed
+        
+        # Calculate rolling average
+        if len(self._samples) >= 2:
+            oldest_time, oldest_completed = self._samples[0]
+            newest_time, newest_completed = self._samples[-1]
+            
+            time_diff = newest_time - oldest_time
+            completed_diff = newest_completed - oldest_completed
+            
+            if time_diff > 0:
+                speed = completed_diff / time_diff
+                return Text(f"{speed:.1f} f/s", style="magenta")
+        
+        # Fallback to overall average
+        elapsed = current_time - self._start_time
+        if elapsed > 0 and completed > 0:
+            speed = completed / elapsed
+            return Text(f"{speed:.1f} f/s", style="magenta")
+        
+        return Text("-- f/s", style="magenta")
 
 
 class RichProgressReporter:
@@ -56,12 +112,14 @@ class RichProgressReporter:
         if self._quiet:
             return
         
-        # Create progress bar for this phase
+        # Create progress bar for this phase with files/s speed indicator
         self._progress = Progress(
             SpinnerColumn(),
             TextColumn("[bold blue]{task.description}"),
             BarColumn(bar_width=40),
             MofNCompleteColumn(),
+            TextColumn("[cyan]•"),
+            FilesPerSecondColumn(),
             TextColumn("[cyan]•"),
             TimeElapsedColumn(),
             TextColumn("[cyan]•"),

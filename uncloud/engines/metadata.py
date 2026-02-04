@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Any
@@ -17,6 +18,168 @@ from .hash_engine import IMAGE_EXTENSIONS
 UNCLOUD_HASH_TAG = "XMP-dc:Description"  # Store in Description temporarily
 UNCLOUD_HASH_PREFIX = "uncloud:hash:"
 UNCLOUD_TAGS_PREFIX = "uncloud:tags:"
+
+
+class ExifToolDaemon:
+    """Persistent ExifTool process that handles multiple requests via stdin/stdout.
+    
+    This is much faster than spawning a new process for each file (45K spawns -> 1 spawn).
+    Uses exiftool's -stay_open mode for persistent operation.
+    
+    NOT thread-safe - use one daemon per thread or protect with lock.
+    """
+    
+    def __init__(self):
+        """Start the ExifTool daemon process."""
+        self._process: Optional[subprocess.Popen] = None
+        self._lock = threading.Lock()
+        self._start()
+    
+    def _start(self) -> None:
+        """Start the exiftool process."""
+        try:
+            self._process = subprocess.Popen(
+                ["exiftool", "-stay_open", "True", "-@", "-"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,  # Line buffered
+            )
+        except FileNotFoundError:
+            self._process = None
+    
+    @property
+    def is_alive(self) -> bool:
+        """Check if the daemon process is running."""
+        return self._process is not None and self._process.poll() is None
+    
+    def extract_hash(self, path: Path) -> Optional[str]:
+        """Extract the stored uncloud hash from file metadata.
+        
+        Args:
+            path: Path to the file.
+            
+        Returns:
+            The stored hash, or None if not found.
+        """
+        if not self.is_alive:
+            return None
+        
+        try:
+            # Send command to exiftool
+            cmd = f"-XMP:Subject\n-s\n-s\n-s\n{path}\n-execute\n"
+            self._process.stdin.write(cmd)
+            self._process.stdin.flush()
+            
+            # Read response until {ready}
+            output_lines = []
+            while True:
+                line = self._process.stdout.readline()
+                if not line:
+                    break
+                if "{ready}" in line:
+                    break
+                output_lines.append(line.strip())
+            
+            # Parse result
+            output = " ".join(output_lines).strip()
+            if output:
+                subjects = output.split(", ")
+                for subj in subjects:
+                    if subj.startswith(UNCLOUD_HASH_PREFIX):
+                        return subj[len(UNCLOUD_HASH_PREFIX):]
+            return None
+        except Exception:
+            return None
+    
+    def write_hash(self, path: Path, hash_value: str) -> bool:
+        """Write the uncloud hash to file metadata.
+        
+        Args:
+            path: Path to the file.
+            hash_value: The similarity hash to store.
+            
+        Returns:
+            True if successful.
+        """
+        if not self.is_alive:
+            return False
+        
+        tag_value = f"{UNCLOUD_HASH_PREFIX}{hash_value}"
+        try:
+            cmd = f"-overwrite_original\n-XMP:Subject+={tag_value}\n{path}\n-execute\n"
+            self._process.stdin.write(cmd)
+            self._process.stdin.flush()
+            
+            # Read response until {ready}
+            while True:
+                line = self._process.stdout.readline()
+                if not line or "{ready}" in line:
+                    break
+            
+            return True
+        except Exception:
+            return False
+    
+    def close(self) -> None:
+        """Shutdown the daemon gracefully."""
+        if self._process is None:
+            return
+        
+        try:
+            if self._process.poll() is None:
+                try:
+                    self._process.stdin.write("-stay_open\nFalse\n")
+                    self._process.stdin.flush()
+                    self._process.wait(timeout=2)
+                except (BrokenPipeError, OSError):
+                    pass
+        except Exception:
+            pass
+        finally:
+            try:
+                if self._process and self._process.poll() is None:
+                    self._process.kill()
+                    self._process.wait(timeout=1)
+            except Exception:
+                pass
+            self._process = None
+    
+    def __enter__(self) -> "ExifToolDaemon":
+        return self
+    
+    def __exit__(self, *args) -> None:
+        self.close()
+
+
+class ThreadLocalExifToolDaemon:
+    """Thread-local storage for ExifTool daemons.
+    
+    Creates one daemon per thread for safe concurrent access.
+    """
+    
+    def __init__(self):
+        """Initialize thread-local storage."""
+        self._local = threading.local()
+        self._all_daemons: list[ExifToolDaemon] = []
+        self._lock = threading.Lock()
+    
+    def get_daemon(self) -> ExifToolDaemon:
+        """Get or create a daemon for the current thread."""
+        if not hasattr(self._local, 'daemon') or not self._local.daemon.is_alive:
+            daemon = ExifToolDaemon()
+            self._local.daemon = daemon
+            with self._lock:
+                self._all_daemons.append(daemon)
+        return self._local.daemon
+    
+    def close_all(self) -> None:
+        """Close all daemons across all threads."""
+        with self._lock:
+            for daemon in self._all_daemons:
+                daemon.close()
+            self._all_daemons.clear()
 
 
 class ExifToolMetadataExtractor:

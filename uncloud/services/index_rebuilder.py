@@ -10,7 +10,7 @@ from typing import Optional
 
 from ..core.protocols import HashEngine, ProgressReporter
 from ..persistence.database import SQLiteMediaRepository, MediaRecord
-from ..engines.metadata import ExifToolMetadataExtractor
+from ..engines.metadata import ThreadLocalExifToolDaemon
 
 
 # Supported media extensions
@@ -198,21 +198,22 @@ class IndexRebuilder:
         from_metadata_count = 0
         computed_count = 0
         
+        # Thread-local ExifTool daemons (one per worker thread)
+        exiftool_daemons = ThreadLocalExifToolDaemon()
+        
         def hash_file(file_path: Path) -> tuple[Path, str | None, str | None, bool]:
             """Hash a single file. Returns (path, hash, error_msg, from_metadata).
             
             First checks if hash is stored in file metadata (fast).
             If not found, computes hash (slow).
+            Uses thread-local ExifTool daemon for efficiency.
             """
             try:
-                # Try to read hash from file metadata first
-                extractor = ExifToolMetadataExtractor(use_batch_mode=False)
-                try:
-                    stored_hash = extractor.extract_uncloud_hash(file_path)
-                    if stored_hash:
-                        return file_path, stored_hash, None, True
-                finally:
-                    extractor.close()
+                # Try to read hash from file metadata first (using daemon)
+                daemon = exiftool_daemons.get_daemon()
+                stored_hash = daemon.extract_hash(file_path)
+                if stored_hash:
+                    return file_path, stored_hash, None, True
                 
                 # Not in metadata, compute it
                 computed_hash = self._hash_engine.compute_hash(file_path)
@@ -318,6 +319,8 @@ class IndexRebuilder:
             raise
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
+            # Clean up all ExifTool daemon processes
+            exiftool_daemons.close_all()
         
         # End progress tracking
         self._progress.end_phase()
