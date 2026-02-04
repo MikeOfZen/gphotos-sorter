@@ -146,9 +146,11 @@ def create_parser() -> argparse.ArgumentParser:
         help="Show what would be indexed without modifying database",
     )
     index_parser.add_argument(
-        "--write-hash",
-        action="store_true",
-        help="Write computed hash to file metadata for faster future reindexing",
+        "--no-write-hash",
+        dest="write_hash",
+        action="store_false",
+        default=True,
+        help="Disable writing computed hash to file metadata (default: enabled)",
     )
     
     # ============ DEDUPE command ============

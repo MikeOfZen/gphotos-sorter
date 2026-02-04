@@ -54,7 +54,7 @@ class IndexRebuilder:
         progress: ProgressReporter,
         workers: int = 4,
         batch_size: int = 64,
-        write_hash: bool = False,
+        write_hash: bool = True,
     ):
         """Initialize the rebuilder.
         
@@ -63,7 +63,7 @@ class IndexRebuilder:
             progress: Reporter for progress updates.
             workers: Number of parallel workers for hashing.
             batch_size: Number of records to batch before DB write (0=disable).
-            write_hash: If True, write computed hash to file metadata.
+            write_hash: If True, write computed hash to file metadata (default: True).
         """
         self._hash_engine = hash_engine
         self._progress = progress
