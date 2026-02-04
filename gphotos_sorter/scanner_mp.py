@@ -9,7 +9,7 @@ import tempfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from queue import Empty
+from queue import Empty, Full
 from typing import Optional
 
 from .config import AppConfig, StorageLayout, FilenameFormat, YearFormat, MonthFormat, DayFormat, DuplicatePolicy
@@ -606,34 +606,49 @@ def process_media_mp(
         hash_workers.append(p)
 
     logger.info("Phase 1: hashing with %d workers...", num_workers)
-    try:
-        for item in work_items:
-            hash_queue.put(item)
-    except KeyboardInterrupt:
-        logger.info("Interrupted by user")
-
-    for _ in range(num_workers):
-        try:
-            hash_queue.put(STOP_SENTINEL)
-        except (KeyboardInterrupt, BrokenPipeError):
-            pass
+    
+    # Feed work items in a non-blocking way to avoid deadlock
+    # Put items gradually while collecting results
+    work_index = 0
+    items_sent = 0
+    sentinels_sent = 0
 
     hash_results: list[HashResult] = []
     expected_results = len(work_items)
     collected = 0
     last_progress = 0
-    while collected < expected_results:
+    
+    # Process results while feeding work items to avoid queue deadlock
+    while collected < expected_results or items_sent < len(work_items):
+        # Try to send more work items (non-blocking)
+        while work_index < len(work_items):
+            try:
+                hash_queue.put_nowait(work_items[work_index])
+                work_index += 1
+                items_sent += 1
+            except Full:
+                break  # Queue full, will try again later
+        
+        # Send sentinels if all work items are sent
+        if items_sent >= len(work_items) and sentinels_sent < num_workers:
+            try:
+                hash_queue.put_nowait(STOP_SENTINEL)
+                sentinels_sent += 1
+            except Full:
+                pass
+        
+        # Try to collect results (with timeout to allow feeding more work)
         try:
-            result: HashResult = hash_result_queue.get(timeout=1)
+            result: HashResult = hash_result_queue.get(timeout=0.1)
+            hash_results.append(result)
+            collected += 1
+            # Log progress every 100 files or 10%
+            if collected - last_progress >= 100 or (collected * 10 // expected_results) > (last_progress * 10 // expected_results):
+                pct = collected * 100 // expected_results
+                logger.info("Phase 1 progress: %d/%d (%d%%) hashed", collected, expected_results, pct)
+                last_progress = collected
         except Empty:
             continue
-        hash_results.append(result)
-        collected += 1
-        # Log progress every 100 files or 10%
-        if collected - last_progress >= 100 or (collected * 10 // expected_results) > (last_progress * 10 // expected_results):
-            pct = collected * 100 // expected_results
-            logger.info("Phase 1 progress: %d/%d (%d%%) hashed", collected, expected_results, pct)
-            last_progress = collected
 
     for p in hash_workers:
         try:
