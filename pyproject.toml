@@ -3,14 +3,14 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "gphotos-sorter"
-version = "0.1.0"
+name = "uncloud"
+version = "1.0.0"
 description = "CLI tool for ingesting and organizing Google Photos takeout exports"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
 authors = [
-    {name = "gphotos-sorter contributors"}
+    {name = "uncloud contributors"}
 ]
 keywords = ["google-photos", "photo-organizer", "exif", "deduplication", "media"]
 classifiers = [
@@ -33,6 +33,7 @@ dependencies = [
     "PyYAML>=6.0.1",
     "Pillow>=10.2.0",
     "ImageHash>=4.3.1",
+    "torchvision>=0.25.0",
 ]
 
 [project.optional-dependencies]
@@ -45,17 +46,17 @@ build = [
 ]
 
 [project.scripts]
-gphotos-sorter = "gphotos_sorter.cli:main"
+uncloud = "uncloud.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/MikeOfZen/gphotos-sorter"
-Repository = "https://github.com/MikeOfZen/gphotos-sorter.git"
-Issues = "https://github.com/MikeOfZen/gphotos-sorter/issues"
-Documentation = "https://github.com/MikeOfZen/gphotos-sorter#readme"
+Homepage = "https://github.com/MikeOfZen/uncloud"
+Repository = "https://github.com/MikeOfZen/uncloud.git"
+Issues = "https://github.com/MikeOfZen/uncloud/issues"
+Documentation = "https://github.com/MikeOfZen/uncloud#readme"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["gphotos_sorter*"]
+include = ["uncloud*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -64,7 +65,7 @@ python_functions = "test_*"
 addopts = "-v --tb=short"
 
 [tool.coverage.run]
-source = ["gphotos_sorter"]
+source = ["uncloud"]
 branch = true
 
 [tool.coverage.report]
