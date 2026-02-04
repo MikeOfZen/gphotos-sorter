@@ -11,7 +11,7 @@ from typing import Iterable, Optional
 from .config import AppConfig, StorageLayout, FilenameFormat, YearFormat, MonthFormat, DayFormat, DuplicatePolicy
 from .date_utils import is_date_folder, parse_date_from_folder
 from .db import MediaDatabase, MediaRecord
-from .hash_utils import compute_hash, get_image_resolution
+from .hash_utils import compute_hash, get_image_resolution, sha256_file, verify_hash_collision
 from .metadata_utils import (
     extract_exif_datetime,
     extract_sidecar_datetime,
@@ -19,6 +19,7 @@ from .metadata_utils import (
     load_sidecar,
     sidecar_has_extras,
     sidecar_to_exif,
+    ExifToolBatch,
 )
 
 MEDIA_EXTENSIONS = {
@@ -222,6 +223,7 @@ def process_media(config: AppConfig, logger: logging.Logger, limit: Optional[int
     db_path = config.resolve_db_path()
     
     # In dry-run mode, don't create directories or database
+    exif_batch = None
     if config.dry_run:
         logger.info("DRY RUN MODE - no files will be copied or modified")
         database = None
@@ -229,10 +231,26 @@ def process_media(config: AppConfig, logger: logging.Logger, limit: Optional[int
     else:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         database = MediaDatabase(db_path)
+        pending = database.get_pending_operations()
+        if pending:
+            logger.warning("Found %d pending operations from previous run, cleaning up...", len(pending))
+            for op in pending:
+                if op.operation == "copy" and op.target_path:
+                    try:
+                        Path(op.target_path).unlink(missing_ok=True)
+                    except Exception:
+                        pass
+            cleared = database.clear_all_pending_operations()
+            logger.info("Cleared %d pending operations", cleared)
         # Pre-load known source paths to skip already-processed files
         logger.info("Loading known source paths from database...")
         known_sources = database.get_all_source_paths()
         logger.info("Found %d known source paths", len(known_sources))
+        if config.modify_exif:
+            try:
+                exif_batch = ExifToolBatch()
+            except Exception:
+                exif_batch = None
     
     # Stats counters
     stats = {
@@ -318,6 +336,16 @@ def process_media(config: AppConfig, logger: logging.Logger, limit: Optional[int
                         stats["error_details"].append(f"Hash failed: {media.path}")
                         continue
 
+                    if similarity_hash.startswith("phash:"):
+                        existing = database.get_by_hash(similarity_hash)
+                        if existing and existing.canonical_path:
+                            try:
+                                if not verify_hash_collision(Path(existing.canonical_path), media.path):
+                                    sha = sha256_file(media.path)
+                                    similarity_hash = f"{similarity_hash}|sha256:{sha}"
+                            except Exception:
+                                pass
+
                     existing = database.get_by_hash(similarity_hash)
                     if existing:
                         # Check duplicate policy
@@ -360,6 +388,15 @@ def process_media(config: AppConfig, logger: logging.Logger, limit: Optional[int
                     canonical_path = find_unique_filename(output_dir, date_taken, media.tags, media.path.suffix,
                                                           config.filename_format)
 
+                    pending_op_id = None
+                    if database:
+                        pending_op_id = database.add_pending_operation(
+                            str(media.path),
+                            str(canonical_path),
+                            similarity_hash,
+                            "copy",
+                        )
+
                     # Get image resolution before copying
                     width, height = get_image_resolution(media.path)
 
@@ -374,9 +411,14 @@ def process_media(config: AppConfig, logger: logging.Logger, limit: Optional[int
                             # Write sidecar metadata to EXIF (if enabled)
                             if config.modify_exif:
                                 try:
-                                    sidecar_to_exif(canonical_path, sidecar, media.tags)
+                                    if exif_batch:
+                                        exif_batch.queue_write(canonical_path, sidecar, media.tags)
+                                    else:
+                                        sidecar_to_exif(canonical_path, sidecar, media.tags)
                                 except Exception as e:
                                     logger.warning("Failed to write EXIF for %s: %s", canonical_path, e)
+                                if exif_batch and exif_batch._pending >= 20:
+                                    exif_batch.flush_and_wait()
                             
                             sidecar_extra = sidecar_has_extras(sidecar)
                             # Copy sidecar if requested or if it has extras
@@ -387,9 +429,14 @@ def process_media(config: AppConfig, logger: logging.Logger, limit: Optional[int
                     elif media.tags and config.modify_exif:
                         # No sidecar but we have tags - write tags to EXIF
                         try:
-                            sidecar_to_exif(canonical_path, {}, media.tags)
+                            if exif_batch:
+                                exif_batch.queue_write(canonical_path, {}, media.tags)
+                            else:
+                                sidecar_to_exif(canonical_path, {}, media.tags)
                         except Exception as e:
                             logger.warning("Failed to write tags to EXIF for %s: %s", canonical_path, e)
+                        if exif_batch and exif_batch._pending >= 20:
+                            exif_batch.flush_and_wait()
 
                     status = "ok" if date_taken else "missing_date"
                     record = MediaRecord(
@@ -406,10 +453,18 @@ def process_media(config: AppConfig, logger: logging.Logger, limit: Optional[int
                         height=height,
                     )
                     database.upsert(record)
+                    if pending_op_id:
+                        database.complete_pending_operation(pending_op_id)
                     stats["processed"] += 1
                     
                 except Exception as e:
                     logger.error("Failed to process %s: %s", media.path, e)
+                    if database:
+                        try:
+                            if "pending_op_id" in locals() and pending_op_id:
+                                database.complete_pending_operation(pending_op_id)
+                        except Exception:
+                            pass
                     stats["errors"] += 1
                     stats["error_details"].append(f"Processing failed: {media.path}: {e}")
             
@@ -453,5 +508,11 @@ def process_media(config: AppConfig, logger: logging.Logger, limit: Optional[int
         
         return stats
     finally:
+        if exif_batch:
+            try:
+                exif_batch.flush_and_wait()
+            except Exception:
+                pass
+            exif_batch.close()
         if database:
             database.close()

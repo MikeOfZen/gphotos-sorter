@@ -4,7 +4,7 @@ import tempfile
 from pathlib import Path
 from PIL import Image
 
-from gphotos_sorter.hash_utils import compute_hash
+from gphotos_sorter.hash_utils import compute_hash, verify_hash_collision
 
 
 class TestComputeHash:
@@ -79,3 +79,33 @@ class TestComputeHash:
             assert result is not None
             
             Path(f.name).unlink()
+
+
+class TestVerifyHashCollision:
+    """Tests for verify_hash_collision."""
+
+    def test_identical_files(self):
+        """Same file should verify as not a collision."""
+        with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as f:
+            f.write(b"same content")
+            f.flush()
+            path = Path(f.name)
+
+        assert verify_hash_collision(path, path)
+        path.unlink()
+
+    def test_different_size_files(self):
+        """Different size files should be treated as collision when size ratio is small."""
+        with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as f1:
+            f1.write(b"small")
+            f1.flush()
+            path1 = Path(f1.name)
+
+        with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as f2:
+            f2.write(b"large file content" * 100)
+            f2.flush()
+            path2 = Path(f2.name)
+
+        assert not verify_hash_collision(path1, path2)
+        path1.unlink()
+        path2.unlink()

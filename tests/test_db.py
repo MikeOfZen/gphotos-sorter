@@ -135,6 +135,52 @@ class TestMediaDatabase:
         assert "/input/photo1.jpg" in all_sources
         assert "/input/photo1_dup.jpg" in all_sources
         assert "/input/photo2.jpg" in all_sources
+
+    def test_has_source_path_index(self):
+        """Test source_path_index lookups and updates."""
+        record = MediaRecord(
+            similarity_hash="abc123",
+            canonical_path="/output/photo.jpg",
+            owner="Test",
+            date_taken=None,
+            date_source="missing",
+            tags=[],
+            source_paths=["/input/photo.jpg"],
+            status="ok",
+            notes=None,
+        )
+        self.db.upsert(record)
+        assert self.db.has_source_path("/input/photo.jpg")
+        assert not self.db.has_source_path("/input/other.jpg")
+
+        self.db.update_existing("abc123", [], ["/input/other.jpg"])
+        assert self.db.has_source_path("/input/other.jpg")
+
+    def test_pending_operations(self):
+        """Test pending operations lifecycle."""
+        op_id = self.db.add_pending_operation(
+            "/input/photo.jpg",
+            "/output/photo.jpg",
+            "abc123",
+            "copy",
+        )
+        pending = self.db.get_pending_operations()
+        assert len(pending) == 1
+        assert pending[0].source_path == "/input/photo.jpg"
+
+        self.db.complete_pending_operation(op_id)
+        pending = self.db.get_pending_operations()
+        assert pending == []
+
+        op_id2 = self.db.add_pending_operation(
+            "/input/photo2.jpg",
+            "/output/photo2.jpg",
+            "def456",
+            "copy",
+        )
+        assert op_id2
+        cleared = self.db.clear_all_pending_operations()
+        assert cleared == 1
         
     def test_record_retrieval(self):
         """Test retrieving a record by hash."""

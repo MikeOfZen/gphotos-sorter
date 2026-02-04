@@ -15,7 +15,7 @@ from typing import Optional
 from .config import AppConfig, StorageLayout, FilenameFormat, YearFormat, MonthFormat, DayFormat, DuplicatePolicy
 from .date_utils import is_date_folder, parse_date_from_folder
 from .db import MediaDatabase, MediaRecord
-from .hash_utils import compute_hash, get_image_resolution
+from .hash_utils import compute_hash, get_image_resolution, sha256_file, verify_hash_collision
 from .metadata_utils import (
     extract_exif_datetime,
     extract_sidecar_datetime,
@@ -23,6 +23,7 @@ from .metadata_utils import (
     load_sidecar,
     sidecar_has_extras,
     sidecar_to_exif,
+    ExifToolBatch,
 )
 from .scanner import MEDIA_EXTENSIONS, sanitize_tag, MONTH_NAMES, MONTH_SHORT, WEEKDAY_NAMES
 
@@ -38,12 +39,48 @@ class WorkItem:
 
 
 @dataclass
-class WorkResult:
-    """Result from a worker, ready for DB write."""
+class HashResult:
+    """Result from hashing/metadata phase (no copy yet)."""
+    path: Path
+    owner: str
+    tags: list[str]
+    sidecar_path: Optional[Path]
+    is_media: bool
+    similarity_hash: Optional[str] = None
+    date_taken: Optional[datetime] = None
+    date_source: str = "missing"
+    width: Optional[int] = None
+    height: Optional[int] = None
+    error: Optional[str] = None
+
+
+@dataclass
+class CopyPlan:
+    """Plan for copying a media file after dedupe decisions."""
+    source_path: Path
+    owner: str
+    filename_tags: list[str]
+    record_tags: list[str]
+    record_source_paths: list[str]
+    sidecar_path: Optional[Path]
+    date_taken: Optional[datetime]
+    date_source: str
+    similarity_hash: str
+    width: Optional[int]
+    height: Optional[int]
+    status: str
+    canonical_path: Path
+    replace_existing_path: Optional[Path] = None
+
+
+@dataclass
+class CopyResult:
+    """Result from copy phase, ready for DB write."""
     record: MediaRecord
-    action: str  # "insert", "update", "error", or "non_media"
-    update_tags: Optional[list[str]] = None
-    update_source: Optional[str] = None
+    pending_op_id: Optional[int]
+    replace_existing_path: Optional[Path]
+    action: str  # "insert", "error", or "non_media"
+    error: Optional[str] = None
 
 
 # Sentinel to signal workers to stop
@@ -191,14 +228,91 @@ def worker_process(
     config_dict: dict,
     worker_id: int,
 ):
-    """Worker process that handles hashing, copying, and EXIF writing."""
-    # Reconstruct config from dict
+    """Worker process that handles hashing and metadata extraction (no copying)."""
+    try:
+        while True:
+            try:
+                item = work_queue.get(timeout=1)
+            except Empty:
+                continue
+
+            if item == STOP_SENTINEL:
+                break
+
+            work_item: WorkItem = item
+
+            try:
+                if not work_item.is_media:
+                    result_queue.put(
+                        HashResult(
+                            path=work_item.path,
+                            owner=work_item.owner,
+                            tags=work_item.tags,
+                            sidecar_path=work_item.sidecar_path,
+                            is_media=False,
+                        )
+                    )
+                    continue
+
+                similarity_hash = compute_hash(work_item.path)
+                if not similarity_hash:
+                    result_queue.put(
+                        HashResult(
+                            path=work_item.path,
+                            owner=work_item.owner,
+                            tags=work_item.tags,
+                            sidecar_path=work_item.sidecar_path,
+                            is_media=True,
+                            error="hash_failed",
+                        )
+                    )
+                    continue
+
+                date_taken, date_source = resolve_date(work_item.path, work_item.sidecar_path)
+                width, height = get_image_resolution(work_item.path)
+                result_queue.put(
+                    HashResult(
+                        path=work_item.path,
+                        owner=work_item.owner,
+                        tags=work_item.tags,
+                        sidecar_path=work_item.sidecar_path,
+                        is_media=True,
+                        similarity_hash=similarity_hash,
+                        date_taken=date_taken,
+                        date_source=date_source,
+                        width=width,
+                        height=height,
+                    )
+                )
+            except Exception as e:
+                result_queue.put(
+                    HashResult(
+                        path=work_item.path,
+                        owner=work_item.owner,
+                        tags=work_item.tags,
+                        sidecar_path=work_item.sidecar_path,
+                        is_media=work_item.is_media,
+                        error=str(e),
+                    )
+                )
+    except KeyboardInterrupt:
+        pass
+
+
+def copy_worker_process(
+    copy_queue: mp.Queue,
+    result_queue: mp.Queue,
+    config_dict: dict,
+    worker_id: int,
+):
+    """Worker process that copies files and writes EXIF (phase 2)."""
     output_root = Path(config_dict["output_root"])
     layout = StorageLayout(config_dict["storage_layout"])
     copy_non_media = config_dict.get("copy_non_media", True)
     dry_run = config_dict.get("dry_run", False)
-    
-    # Reconstruct FilenameFormat
+    modify_exif = config_dict.get("modify_exif", True)
+    copy_sidecar = config_dict.get("copy_sidecar", False)
+
     fmt = FilenameFormat(
         include_time=config_dict.get("fmt_include_time", True),
         year_format=YearFormat(config_dict.get("fmt_year_format", "YYYY")),
@@ -207,232 +321,173 @@ def worker_process(
         include_tags=config_dict.get("fmt_include_tags", True),
         max_tags=config_dict.get("fmt_max_tags", 5),
     )
-    
+
+    exif_batch = None
+    if modify_exif and not dry_run:
+        try:
+            exif_batch = ExifToolBatch()
+        except Exception:
+            exif_batch = None
+
     try:
         while True:
             try:
-                item = work_queue.get(timeout=1)
+                item = copy_queue.get(timeout=1)
             except Empty:
                 continue
-            
+
             if item == STOP_SENTINEL:
                 break
-            
-            work_item: WorkItem = item
-            
-            try:
-                # Handle non-media files differently
-                if not work_item.is_media:
-                    if copy_non_media:
-                        non_media_dir = output_root / work_item.owner / "non_media"
-                        if not dry_run:
-                            non_media_dir.mkdir(parents=True, exist_ok=True)
-                        dest = non_media_dir / work_item.path.name
-                        counter = 0
-                        while not dry_run and dest.exists():
-                            counter += 1
-                            dest = non_media_dir / f"{work_item.path.stem}_{counter}{work_item.path.suffix}"
-                        if not dry_run:
-                            shutil.copy2(work_item.path, dest)
-                        # Create a minimal record for non-media
-                        record = MediaRecord(
-                            similarity_hash=f"non_media:{work_item.path}",
-                            canonical_path=str(dest),
-                            owner=work_item.owner,
-                            date_taken=None,
-                            date_source="none",
-                            tags=[],
-                            source_paths=[str(work_item.path)],
-                            status="non_media",
-                            notes=None,
-                        )
-                        result_queue.put(WorkResult(record=record, action="non_media"))
+
+            kind = item.get("kind")
+
+            if kind == "non_media":
+                if not copy_non_media:
                     continue
-            
-                # Compute hash for media files
-                similarity_hash = compute_hash(work_item.path)
-                if not similarity_hash:
+                source_path = item["source_path"]
+                owner = item["owner"]
+                try:
+                    non_media_dir = output_root / owner / "non_media"
+                    if not dry_run:
+                        non_media_dir.mkdir(parents=True, exist_ok=True)
+                    dest = non_media_dir / source_path.name
+                    counter = 0
+                    while not dry_run and dest.exists():
+                        counter += 1
+                        dest = non_media_dir / f"{source_path.stem}_{counter}{source_path.suffix}"
+                    if not dry_run:
+                        shutil.copy2(source_path, dest)
                     record = MediaRecord(
-                        similarity_hash=f"error:{work_item.path}",
-                        canonical_path="",
-                        owner=work_item.owner,
+                        similarity_hash=f"non_media:{source_path}",
+                        canonical_path=str(dest),
+                        owner=owner,
                         date_taken=None,
-                        date_source="error",
-                        tags=work_item.tags,
-                        source_paths=[str(work_item.path)],
-                        status="error",
-                        notes="hash_failed",
+                        date_source="none",
+                        tags=[],
+                        source_paths=[str(source_path)],
+                        status="non_media",
+                        notes=None,
                     )
-                    result_queue.put(WorkResult(record=record, action="error"))
-                    continue
-                
-                # Put hash result for duplicate check (will be handled by writer)
-                # We'll send a "check" action first, then writer responds via a different mechanism
-                # Actually, simpler: we compute hash and let writer decide insert/update
-                
-                date_taken, date_source = resolve_date(work_item.path, work_item.sidecar_path)
-                output_dir = build_output_dir(output_root, work_item.owner, date_taken, layout)
-                if not dry_run:
-                    output_dir.mkdir(parents=True, exist_ok=True)
-                canonical_path = find_unique_filename(output_dir, date_taken, work_item.tags, work_item.path.suffix, fmt)
-                
-                # Get image resolution before copying
-                width, height = get_image_resolution(work_item.path)
-                
-                # Copy file
-                if not dry_run:
-                    shutil.copy2(work_item.path, canonical_path)
-                
-                # Process sidecar and write EXIF
-                sidecar_extra = False
-                if work_item.sidecar_path:
-                    sidecar = load_sidecar(work_item.sidecar_path)
-                    if sidecar:
-                        if not dry_run:
-                            try:
-                                sidecar_to_exif(canonical_path, sidecar, work_item.tags)
-                            except Exception:
-                                pass
-                        sidecar_extra = sidecar_has_extras(sidecar)
-                        if sidecar_extra and not dry_run:
-                            target_sidecar = canonical_path.with_suffix(
-                                canonical_path.suffix + ".supplemental-metadata.json"
-                            )
-                            if not target_sidecar.exists():
-                                shutil.copy2(work_item.sidecar_path, target_sidecar)
-                elif work_item.tags:
-                    try:
-                        sidecar_to_exif(canonical_path, {}, work_item.tags)
-                    except Exception:
-                        pass
-                
-                status = "ok" if date_taken else "missing_date"
-                record = MediaRecord(
-                    similarity_hash=similarity_hash,
-                    canonical_path=str(canonical_path),
-                    owner=work_item.owner,
-                    date_taken=date_taken.isoformat() if date_taken else None,
-                    date_source=date_source,
-                    tags=sorted(set(work_item.tags)),
-                    source_paths=[str(work_item.path)],
-                    status=status,
-                    notes=None if not sidecar_extra else "sidecar_copied",
-                    width=width,
-                    height=height,
-                )
-                result_queue.put(WorkResult(record=record, action="insert"))
-                
-            except Exception as e:
-                record = MediaRecord(
-                    similarity_hash=f"error:{work_item.path}",
-                    canonical_path="",
-                    owner=work_item.owner,
-                    date_taken=None,
-                    date_source="error",
-                    tags=work_item.tags,
-                    source_paths=[str(work_item.path)],
-                    status="error",
-                    notes=str(e),
-                )
-                result_queue.put(WorkResult(record=record, action="error"))
-    except KeyboardInterrupt:
-        pass
-
-
-def writer_process(
-    result_queue: mp.Queue,
-    stats_dict: dict,
-    db_path: Path,
-    total_items: int,
-    stop_event: mp.Event,
-    duplicate_policy: str = "keep-first",
-):
-    """Single writer process that handles all DB operations."""
-    database = MediaDatabase(db_path)
-    
-    processed = 0
-    skipped = 0
-    errors = 0
-    non_media = 0
-    
-    try:
-        while not stop_event.is_set() or not result_queue.empty():
-            try:
-                result: WorkResult = result_queue.get(timeout=0.5)
-            except Empty:
-                continue
-            
-            if result.action == "error":
-                errors += 1
-                # DON'T add error records to database - file might be temporarily unavailable
-                # On next run, we'll try again since the source path won't be in known_sources
-            elif result.action == "non_media":
-                non_media += 1
-                # Don't add non-media to DB, just track count
-            elif result.action == "insert":
-                # Check if this hash already exists
-                existing = database.get_by_hash(result.record.similarity_hash)
-                if existing:
-                    # Duplicate found - check policy
-                    if duplicate_policy == "keep-higher-resolution":
-                        # Compare resolutions
-                        new_width, new_height = result.record.width, result.record.height
-                        existing_width, existing_height = existing.width, existing.height
-                        
-                        new_pixels = (new_width * new_height) if new_width and new_height else 0
-                        existing_pixels = (existing_width * existing_height) if existing_width and existing_height else 0
-                        
-                        if new_pixels > existing_pixels:
-                            # New file has higher resolution - replace
-                            try:
-                                Path(existing.canonical_path).unlink(missing_ok=True)
-                            except Exception:
-                                pass
-                            # Update DB with new file
-                            database.upsert(result.record)
-                            processed += 1
-                        else:
-                            # Keep existing (same or higher resolution)
-                            database.update_existing(
-                                result.record.similarity_hash,
-                                result.record.tags,
-                                result.record.source_paths,
-                            )
-                            # Remove the newly copied file (it's lower resolution)
-                            try:
-                                Path(result.record.canonical_path).unlink(missing_ok=True)
-                            except Exception:
-                                pass
-                            skipped += 1
-                    else:
-                        # Default: keep first
-                        database.update_existing(
-                            result.record.similarity_hash,
-                            result.record.tags,
-                            result.record.source_paths,
+                    result_queue.put(
+                        CopyResult(
+                            record=record,
+                            pending_op_id=None,
+                            replace_existing_path=None,
+                            action="non_media",
                         )
-                        # Remove the file we just copied (it's a duplicate)
+                    )
+                except Exception as e:
+                    result_queue.put(
+                        CopyResult(
+                            record=MediaRecord(
+                                similarity_hash=f"error:{source_path}",
+                                canonical_path="",
+                                owner=owner,
+                                date_taken=None,
+                                date_source="error",
+                                tags=[],
+                                source_paths=[str(source_path)],
+                                status="error",
+                                notes=str(e),
+                            ),
+                            pending_op_id=None,
+                            replace_existing_path=None,
+                            action="error",
+                            error=str(e),
+                        )
+                    )
+                continue
+
+            if kind == "media":
+                plan: CopyPlan = item["plan"]
+                pending_op_id = item.get("pending_op_id")
+                try:
+                    canonical_path = plan.canonical_path
+                    if not dry_run:
+                        canonical_path.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(plan.source_path, canonical_path)
+
+                    sidecar_extra = False
+                    if plan.sidecar_path:
+                        sidecar = load_sidecar(plan.sidecar_path)
+                        if sidecar and modify_exif:
+                            try:
+                                if exif_batch:
+                                    exif_batch.queue_write(canonical_path, sidecar, plan.filename_tags)
+                                else:
+                                    sidecar_to_exif(canonical_path, sidecar, plan.filename_tags)
+                            except Exception:
+                                pass
+                        if sidecar:
+                            sidecar_extra = sidecar_has_extras(sidecar)
+                            if (copy_sidecar or sidecar_extra) and not dry_run:
+                                target_sidecar = canonical_path.with_suffix(
+                                    canonical_path.suffix + ".supplemental-metadata.json"
+                                )
+                                if not target_sidecar.exists():
+                                    shutil.copy2(plan.sidecar_path, target_sidecar)
+                    elif plan.filename_tags and modify_exif:
                         try:
-                            Path(result.record.canonical_path).unlink(missing_ok=True)
+                            if exif_batch:
+                                exif_batch.queue_write(canonical_path, {}, plan.filename_tags)
+                            else:
+                                sidecar_to_exif(canonical_path, {}, plan.filename_tags)
                         except Exception:
                             pass
-                        skipped += 1
-                else:
-                    database.upsert(result.record)
-                    processed += 1
-            
-            # Log progress periodically
-            total = processed + skipped + errors + non_media
-            if total % 100 == 0:
-                print(f"Progress: {total}/{total_items} (processed={processed}, skipped={skipped}, non_media={non_media}, errors={errors})")
+
+                    if exif_batch and exif_batch._pending >= 20:
+                        exif_batch.flush_and_wait()
+
+                    record = MediaRecord(
+                        similarity_hash=plan.similarity_hash,
+                        canonical_path=str(canonical_path),
+                        owner=plan.owner,
+                        date_taken=plan.date_taken.isoformat() if plan.date_taken else None,
+                        date_source=plan.date_source,
+                        tags=sorted(set(plan.record_tags)),
+                        source_paths=sorted(set(plan.record_source_paths)),
+                        status=plan.status,
+                        notes=None if not sidecar_extra else "sidecar_copied",
+                        width=plan.width,
+                        height=plan.height,
+                    )
+                    result_queue.put(
+                        CopyResult(
+                            record=record,
+                            pending_op_id=pending_op_id,
+                            replace_existing_path=plan.replace_existing_path,
+                            action="insert",
+                        )
+                    )
+                except Exception as e:
+                    result_queue.put(
+                        CopyResult(
+                            record=MediaRecord(
+                                similarity_hash=f"error:{plan.source_path}",
+                                canonical_path="",
+                                owner=plan.owner,
+                                date_taken=None,
+                                date_source="error",
+                                tags=plan.record_tags,
+                                source_paths=[str(plan.source_path)],
+                                status="error",
+                                notes=str(e),
+                            ),
+                            pending_op_id=pending_op_id,
+                            replace_existing_path=plan.replace_existing_path,
+                            action="error",
+                            error=str(e),
+                        )
+                    )
     except KeyboardInterrupt:
         pass
     finally:
-        database.close()
-        stats_dict["processed"] = processed
-        stats_dict["skipped"] = skipped
-        stats_dict["errors"] = errors
-        stats_dict["non_media"] = non_media
+        if exif_batch:
+            try:
+                exif_batch.flush_and_wait()
+            except Exception:
+                pass
+            exif_batch.close()
 
 
 def process_media_mp(
@@ -442,53 +497,59 @@ def process_media_mp(
     recursive: bool = True,
     num_workers: int = 4,
 ) -> dict:
-    """Process media files using multiprocessing."""
-    
-    # In dry-run mode, use a temporary database
+    """Process media files using multiprocessing (two-phase: hash then copy)."""
+
     temp_db_file = None
+    database = None
     if config.dry_run:
         logger.info("DRY RUN MODE - using temporary database (will be deleted after run)")
         temp_db_file = tempfile.NamedTemporaryFile(suffix=".sqlite", delete=False)
         db_path = Path(temp_db_file.name)
         temp_db_file.close()
-        known_sources = set()  # Empty set in dry-run
+        known_sources = set()
     else:
         db_path = config.resolve_db_path()
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        # Pre-load known source paths to skip already-processed files
-        logger.info("Loading known source paths from database...")
         database = MediaDatabase(db_path)
+
+        # Recover from pending operations (crash recovery)
+        pending = database.get_pending_operations()
+        if pending:
+            logger.warning("Found %d pending operations from previous run, cleaning up...", len(pending))
+            for op in pending:
+                if op.operation == "copy" and op.target_path:
+                    try:
+                        Path(op.target_path).unlink(missing_ok=True)
+                    except Exception:
+                        pass
+            cleared = database.clear_all_pending_operations()
+            logger.info("Cleared %d pending operations", cleared)
+
+        logger.info("Loading known source paths from database...")
         raw_known_sources = database.get_all_source_paths()
-        # Normalize all paths for consistent comparison
         known_sources = {os.path.normpath(p) for p in raw_known_sources}
-        database.close()
         logger.info("Found %d known source paths", len(known_sources))
-    
-    # Get config options
+
     copy_non_media = config.copy_non_media
     duplicate_policy = config.duplicate_policy.value
     fmt = config.filename_format or FilenameFormat()
-    
-    # Collect all work items, filtering out known sources
+
     logger.info("Scanning input directories...")
-    work_items = []
+    work_items: list[WorkItem] = []
     skipped_known = 0
     media_count = 0
     non_media_count = 0
-    
+
     for input_root in config.input_roots:
         if not input_root.path.exists():
             logger.warning("Input root missing: %s", input_root.path)
             continue
         debug_logged = 0
         for item in iter_work_items(input_root.path, input_root.owner, recursive=recursive, include_non_media=copy_non_media):
-            # Normalize path for consistent comparison with known_sources
             normalized_path = os.path.normpath(str(item.path))
             if normalized_path in known_sources:
                 skipped_known += 1
-                continue  # Skip already processed
-            # Debug log first few items to help diagnose path mismatches
+                continue
             if debug_logged < 3 and known_sources:
                 sample_known = next(iter(known_sources))
                 logger.debug("Path comparison - item: %r, sample known: %r", normalized_path, sample_known)
@@ -502,12 +563,15 @@ def process_media_mp(
                 break
         if limit and len(work_items) >= limit:
             break
-    
-    # Total items should only count media files for progress tracking
+
     total_items = media_count
-    logger.info("Found %d media files to process (%d non-media files will also be handled, %d skipped_known)", 
-                media_count, non_media_count, skipped_known)
-    
+    logger.info(
+        "Found %d media files to process (%d non-media files will also be handled, %d skipped_known)",
+        media_count,
+        non_media_count,
+        skipped_known,
+    )
+
     if total_items == 0:
         logger.info("============================================================")
         logger.info("PROCESSING SUMMARY")
@@ -515,22 +579,18 @@ def process_media_mp(
         logger.info("No new files to process (all already in database)")
         logger.info("============================================================")
         return {"processed": 0, "skipped": 0, "errors": 0, "non_media": 0, "skipped_known": skipped_known}
-    
-    # Create queues
-    work_queue = mp.Queue(maxsize=1000)
-    result_queue = mp.Queue()
-    stop_event = mp.Event()
-    
-    # Shared stats dict
-    manager = mp.Manager()
-    stats_dict = manager.dict()
-    
-    # Config dict for workers
+
+    # Phase 1: hash and metadata extraction
+    hash_queue = mp.Queue(maxsize=1000)
+    hash_result_queue = mp.Queue()
+
     config_dict = {
         "output_root": str(config.output_root),
         "storage_layout": config.storage_layout.value,
         "copy_non_media": copy_non_media,
         "dry_run": config.dry_run,
+        "modify_exif": config.modify_exif,
+        "copy_sidecar": config.copy_sidecar,
         "fmt_include_time": fmt.include_time,
         "fmt_year_format": fmt.year_format.value,
         "fmt_month_format": fmt.month_format.value,
@@ -538,66 +598,255 @@ def process_media_mp(
         "fmt_include_tags": fmt.include_tags,
         "fmt_max_tags": fmt.max_tags,
     }
-    
-    # Start worker processes
-    workers = []
+
+    hash_workers = []
     for i in range(num_workers):
-        p = mp.Process(
-            target=worker_process,
-            args=(work_queue, result_queue, config_dict, i),
-        )
+        p = mp.Process(target=worker_process, args=(hash_queue, hash_result_queue, config_dict, i))
         p.start()
-        workers.append(p)
-    
-    # Start writer process
-    writer = mp.Process(
-        target=writer_process,
-        args=(result_queue, stats_dict, db_path, total_items, stop_event, duplicate_policy),
-    )
-    writer.start()
-    
-    # Feed work items
-    logger.info("Starting processing with %d workers...", num_workers)
+        hash_workers.append(p)
+
+    logger.info("Phase 1: hashing with %d workers...", num_workers)
     try:
         for item in work_items:
-            work_queue.put(item)
+            hash_queue.put(item)
     except KeyboardInterrupt:
         logger.info("Interrupted by user")
-    
-    # Send stop sentinels to workers
+
     for _ in range(num_workers):
         try:
-            work_queue.put(STOP_SENTINEL)
+            hash_queue.put(STOP_SENTINEL)
         except (KeyboardInterrupt, BrokenPipeError):
             pass
-    
-    # Wait for workers to finish
-    for p in workers:
+
+    hash_results: list[HashResult] = []
+    expected_results = len(work_items)
+    collected = 0
+    while collected < expected_results:
+        try:
+            result: HashResult = hash_result_queue.get(timeout=1)
+        except Empty:
+            continue
+        hash_results.append(result)
+        collected += 1
+
+    for p in hash_workers:
         try:
             p.join(timeout=10)
         except (KeyboardInterrupt, BrokenPipeError):
             p.terminate()
-    
-    # Signal writer to stop and wait
-    try:
-        stop_event.set()
-    except (KeyboardInterrupt, BrokenPipeError):
-        pass
-    
-    try:
-        writer.join(timeout=10)
-    except (KeyboardInterrupt, BrokenPipeError):
-        writer.terminate()
-    
+
+    # Phase 1 analysis: dedupe and build copy plan
+    processed = 0
+    skipped = 0
+    errors = 0
+    non_media = 0
+
+    non_media_plans: list[dict] = []
+    media_candidates: dict[str, list[HashResult]] = {}
+
+    for result in hash_results:
+        if result.error:
+            errors += 1
+            continue
+        if not result.is_media:
+            non_media += 1
+            if copy_non_media:
+                non_media_plans.append({"kind": "non_media", "source_path": result.path, "owner": result.owner})
+            continue
+        if not result.similarity_hash:
+            errors += 1
+            continue
+        media_candidates.setdefault(result.similarity_hash, []).append(result)
+
+    expanded_candidates: dict[str, list[HashResult]] = {}
+    for sim_hash, group in media_candidates.items():
+        if sim_hash.startswith("phash:") and len(group) > 1:
+            sha_groups: dict[str, list[HashResult]] = {}
+            for item in group:
+                sha = sha256_file(item.path)
+                sha_groups.setdefault(sha, []).append(item)
+            if len(sha_groups) > 1:
+                for sha, items in sha_groups.items():
+                    expanded_candidates.setdefault(f"{sim_hash}|sha256:{sha}", []).extend(items)
+            else:
+                expanded_candidates.setdefault(sim_hash, []).extend(group)
+        else:
+            expanded_candidates.setdefault(sim_hash, []).extend(group)
+
+    copy_plans: list[CopyPlan] = []
+
+    for sim_hash, group in expanded_candidates.items():
+        existing = None
+        final_hash = sim_hash
+        if database and sim_hash.startswith("phash:"):
+            existing = database.get_by_hash(sim_hash)
+            if existing and existing.canonical_path:
+                try:
+                    if not verify_hash_collision(Path(existing.canonical_path), group[0].path):
+                        sha = sha256_file(group[0].path)
+                        final_hash = f"{sim_hash}|sha256:{sha}"
+                        existing = database.get_by_hash(final_hash)
+                except Exception:
+                    pass
+        elif database:
+            existing = database.get_by_hash(sim_hash)
+
+        # Choose candidate
+        def pixels(item: HashResult) -> int:
+            return (item.width * item.height) if item.width and item.height else 0
+
+        chosen = group[0]
+        if duplicate_policy == "keep-higher-resolution":
+            chosen = max(group, key=pixels)
+
+        merged_tags = sorted({t for item in group for t in item.tags})
+        merged_sources = sorted({str(item.path) for item in group})
+
+        if existing and database and duplicate_policy == "keep-higher-resolution":
+            existing_pixels = (existing.width * existing.height) if existing.width and existing.height else 0
+            chosen_pixels = pixels(chosen)
+            if chosen_pixels > existing_pixels:
+                merged_tags = sorted(set(merged_tags).union(existing.tags))
+                merged_sources = sorted(set(merged_sources).union(existing.source_paths))
+                output_dir = build_output_dir(config.output_root, chosen.owner, chosen.date_taken, config.storage_layout)
+                canonical_path = find_unique_filename(output_dir, chosen.date_taken, chosen.tags, chosen.path.suffix, fmt)
+                status = "ok" if chosen.date_taken else "missing_date"
+                copy_plans.append(
+                    CopyPlan(
+                        source_path=chosen.path,
+                        owner=chosen.owner,
+                        filename_tags=chosen.tags,
+                        record_tags=merged_tags,
+                        record_source_paths=merged_sources,
+                        sidecar_path=chosen.sidecar_path,
+                        date_taken=chosen.date_taken,
+                        date_source=chosen.date_source,
+                        similarity_hash=final_hash,
+                        width=chosen.width,
+                        height=chosen.height,
+                        status=status,
+                        canonical_path=canonical_path,
+                        replace_existing_path=Path(existing.canonical_path),
+                    )
+                )
+                if len(group) > 1:
+                    skipped += len(group) - 1
+            else:
+                database.update_existing(final_hash, merged_tags, merged_sources)
+                skipped += len(group)
+            continue
+
+        if existing and database:
+            database.update_existing(final_hash, merged_tags, merged_sources)
+            skipped += len(group)
+            continue
+
+        output_dir = build_output_dir(config.output_root, chosen.owner, chosen.date_taken, config.storage_layout)
+        canonical_path = find_unique_filename(output_dir, chosen.date_taken, chosen.tags, chosen.path.suffix, fmt)
+        status = "ok" if chosen.date_taken else "missing_date"
+        copy_plans.append(
+            CopyPlan(
+                source_path=chosen.path,
+                owner=chosen.owner,
+                filename_tags=chosen.tags,
+                record_tags=merged_tags,
+                record_source_paths=merged_sources,
+                sidecar_path=chosen.sidecar_path,
+                date_taken=chosen.date_taken,
+                date_source=chosen.date_source,
+                similarity_hash=final_hash,
+                width=chosen.width,
+                height=chosen.height,
+                status=status,
+                canonical_path=canonical_path,
+            )
+        )
+        if len(group) > 1:
+            skipped += len(group) - 1
+
+    if config.dry_run:
+        processed = len(copy_plans)
+        result = {
+            "processed": processed,
+            "skipped": skipped,
+            "errors": errors,
+            "non_media": non_media,
+            "skipped_known": skipped_known,
+        }
+        return result
+
+    # Phase 2: copy and EXIF writing
+    copy_queue = mp.Queue(maxsize=1000)
+    copy_result_queue = mp.Queue()
+
+    copy_workers = []
+    for i in range(num_workers):
+        p = mp.Process(target=copy_worker_process, args=(copy_queue, copy_result_queue, config_dict, i))
+        p.start()
+        copy_workers.append(p)
+
+    logger.info("Phase 2: copying with %d workers...", num_workers)
+
+    for plan in copy_plans:
+        pending_op_id = None
+        if database:
+            pending_op_id = database.add_pending_operation(
+                str(plan.source_path),
+                str(plan.canonical_path),
+                plan.similarity_hash,
+                "copy",
+            )
+        copy_queue.put({"kind": "media", "plan": plan, "pending_op_id": pending_op_id})
+
+    for item in non_media_plans:
+        copy_queue.put(item)
+
+    for _ in range(num_workers):
+        try:
+            copy_queue.put(STOP_SENTINEL)
+        except (KeyboardInterrupt, BrokenPipeError):
+            pass
+
+    expected_copy_results = len(copy_plans) + len(non_media_plans)
+    collected = 0
+    while collected < expected_copy_results:
+        try:
+            result: CopyResult = copy_result_queue.get(timeout=1)
+        except Empty:
+            continue
+        collected += 1
+        if result.action == "insert":
+            if database:
+                database.upsert(result.record)
+                if result.pending_op_id:
+                    database.complete_pending_operation(result.pending_op_id)
+            if result.replace_existing_path:
+                try:
+                    result.replace_existing_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            processed += 1
+        elif result.action == "non_media":
+            pass
+        elif result.action == "error":
+            errors += 1
+            if database and result.pending_op_id:
+                database.complete_pending_operation(result.pending_op_id)
+
+    for p in copy_workers:
+        try:
+            p.join(timeout=10)
+        except (KeyboardInterrupt, BrokenPipeError):
+            p.terminate()
+
     result = {
-        "processed": stats_dict.get("processed", 0),
-        "skipped": stats_dict.get("skipped", 0),
-        "errors": stats_dict.get("errors", 0),
-        "non_media": stats_dict.get("non_media", 0),
+        "processed": processed,
+        "skipped": skipped,
+        "errors": errors,
+        "non_media": non_media,
         "skipped_known": skipped_known,
     }
-    
-    # Print comprehensive summary
+
     logger.info("============================================================")
     logger.info("PROCESSING SUMMARY")
     logger.info("============================================================")
@@ -611,8 +860,7 @@ def process_media_mp(
     logger.info("  - Errors: %d", result["errors"])
     if non_media_count > 0:
         logger.info("Non-media files copied: %d", result["non_media"])
-    
-    # Validation
+
     expected = media_count
     actual = result["processed"] + result["skipped"] + result["errors"]
     if expected == actual:
@@ -620,13 +868,15 @@ def process_media_mp(
     else:
         logger.warning("Validation MISMATCH: expected=%d, actual=%d", expected, actual)
     logger.info("============================================================")
-    
-    # Clean up temporary database in dry-run mode
+
     if config.dry_run and temp_db_file:
         try:
             db_path.unlink(missing_ok=True)
             logger.info("Temporary database cleaned up")
         except Exception as e:
             logger.warning("Failed to clean up temporary database: %s", e)
-    
+
+    if database:
+        database.close()
+
     return result
