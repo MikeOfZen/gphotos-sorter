@@ -69,7 +69,7 @@ class TestInputSource:
         source = InputSource(path=tmp_path, owner="alice")
         
         with pytest.raises(AttributeError):
-            source.owner = "bob"
+            source.owner = "bob"  # type: ignore[misc]
     
     def test_from_dict(self, tmp_path: Path):
         """Test from_dict factory."""

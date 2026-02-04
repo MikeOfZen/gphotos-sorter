@@ -105,6 +105,7 @@ class SQLiteMediaRepository:
     
     def get_by_hash(self, similarity_hash: str) -> Optional[MediaRecord]:
         """Get record by similarity hash."""
+        assert self._conn is not None
         cursor = self._conn.cursor()
         cursor.execute(
             "SELECT * FROM media WHERE similarity_hash = ?",
@@ -115,6 +116,7 @@ class SQLiteMediaRepository:
     
     def has_source_path(self, path: str) -> bool:
         """Check if source path already processed."""
+        assert self._conn is not None
         cursor = self._conn.cursor()
         cursor.execute(
             "SELECT 1 FROM source_path_index WHERE path = ?",
@@ -124,12 +126,14 @@ class SQLiteMediaRepository:
     
     def get_all_source_paths(self) -> set[str]:
         """Get all known source paths."""
+        assert self._conn is not None
         cursor = self._conn.cursor()
         cursor.execute("SELECT path FROM source_path_index")
         return {row[0] for row in cursor.fetchall()}
     
     def upsert(self, record: MediaRecord) -> None:
         """Insert or update a record."""
+        assert self._conn is not None
         cursor = self._conn.cursor()
         
         cursor.execute("""
@@ -177,22 +181,25 @@ class SQLiteMediaRepository:
         op: str
     ) -> int:
         """Track a pending operation for crash recovery."""
+        assert self._conn is not None
         cursor = self._conn.cursor()
         cursor.execute("""
             INSERT INTO pending_operations (source_path, target_path, similarity_hash, operation)
             VALUES (?, ?, ?, ?)
         """, (source, target, hash_val, op))
         self._conn.commit()
-        return cursor.lastrowid
+        return cursor.lastrowid or 0
     
     def complete_pending_operation(self, op_id: int) -> None:
         """Mark operation as complete."""
+        assert self._conn is not None
         cursor = self._conn.cursor()
         cursor.execute("DELETE FROM pending_operations WHERE id = ?", (op_id,))
         self._conn.commit()
     
     def get_pending_operations(self) -> list[PendingOperation]:
         """Get all pending operations."""
+        assert self._conn is not None
         cursor = self._conn.cursor()
         cursor.execute("SELECT * FROM pending_operations")
         return [
@@ -209,6 +216,7 @@ class SQLiteMediaRepository:
     
     def clear_all_pending_operations(self) -> int:
         """Clear all pending operations."""
+        assert self._conn is not None
         cursor = self._conn.cursor()
         cursor.execute("DELETE FROM pending_operations")
         count = cursor.rowcount

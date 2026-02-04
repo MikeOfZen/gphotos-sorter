@@ -1,7 +1,5 @@
 """Tests for Rich progress reporter."""
 import pytest
-from pathlib import Path
-from io import StringIO
 
 from uncloud.logging.rich_logger import RichProgressReporter, QuietProgressReporter
 from uncloud.core.models import ProcessingStats

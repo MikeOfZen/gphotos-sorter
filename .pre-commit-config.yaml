@@ -1,0 +1,77 @@
+repos:
+  # ==========================================
+  # Python code quality
+  # ==========================================
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.8.4
+    hooks:
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+      - id: ruff-format
+
+  - repo: https://github.com/asottile/pyupgrade
+    rev: v3.15.0
+    hooks:
+      - id: pyupgrade
+        args: [--py312-plus]
+        language_version: python3.12
+
+  - repo: local
+    hooks:
+      - id: pyright
+        name: pyright
+        entry: uvx pyright
+        language: system
+        types: [python]
+        pass_filenames: false
+        require_serial: true
+
+  - repo: https://github.com/PyCQA/bandit
+    rev: 1.7.6
+    hooks:
+      - id: bandit
+        args: [-ll]
+        exclude: ^tests/
+
+  # ==========================================
+  # General checks
+  # ==========================================
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: no-commit-to-branch
+        args: [--branch, main, --branch, master]
+      - id: debug-statements
+      - id: check-docstring-first
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+        exclude: '\.vscode/.*\.json$'
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=5000]
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+
+  # ==========================================
+  # Spell checking
+  # ==========================================
+  - repo: https://github.com/codespell-project/codespell
+    rev: v2.2.6
+    hooks:
+      - id: codespell
+        args: [--ignore-words-list=hist]
+
+  # ==========================================
+  # Tests on main branch
+  # ==========================================
+  - repo: local
+    hooks:
+      - id: pytest-main-branch
+        name: Run tests on main branch
+        entry: bash -c 'if [ "$(git branch --show-current)" = "main" ]; then uv run pytest tests/ -v; else exit 0; fi'
+        language: system
+        pass_filenames: false
+        always_run: true

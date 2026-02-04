@@ -9,7 +9,6 @@ from uncloud.core.models import (
     MediaItem,
     HashResult,
     DuplicateGroup,
-    CopyPlan,
     ProcessingResult,
     ProcessingStats,
 )
@@ -68,7 +67,7 @@ class TestMediaItem:
         item = MediaItem(path=test_file, owner="alice")
         
         with pytest.raises(AttributeError):
-            item.owner = "bob"
+            item.owner = "bob"  # type: ignore[misc]
 
 
 class TestHashResult:

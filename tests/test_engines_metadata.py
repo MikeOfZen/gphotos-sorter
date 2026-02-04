@@ -1,7 +1,6 @@
 """Tests for metadata extraction."""
 import pytest
 from pathlib import Path
-from datetime import datetime
 from PIL import Image
 import json
 

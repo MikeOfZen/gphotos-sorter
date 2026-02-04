@@ -1,7 +1,6 @@
 """Tests for service layer components."""
 import pytest
 from pathlib import Path
-from PIL import Image
 
 from uncloud.core.models import MediaItem, HashResult, DuplicateGroup
 from uncloud.core.config import (
