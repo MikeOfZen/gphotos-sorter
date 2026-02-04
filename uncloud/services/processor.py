@@ -235,6 +235,7 @@ class MediaProcessor:
         
         # Use ProcessPoolExecutor for true parallelism
         executor = ProcessPoolExecutor(max_workers=self._config.workers)
+        futures: dict = {}
         try:
             futures = {
                 executor.submit(_hash_item_worker, item_dict): i
@@ -242,28 +243,39 @@ class MediaProcessor:
             }
             
             completed = 0
-            for future in as_completed(futures):
-                # Check for interrupt
-                if _interrupted:
-                    # Shutdown executor immediately
-                    executor.shutdown(wait=False)
-                    raise KeyboardInterrupt()
+            pending = set(futures.keys())
+            
+            while pending and not _interrupted:
+                # Wait for at least one to complete, with short timeout for interrupt check
+                import concurrent.futures
+                done, pending = concurrent.futures.wait(
+                    pending, timeout=0.5, 
+                    return_when=concurrent.futures.FIRST_COMPLETED
+                )
                 
-                try:
-                    result_dict = future.result()
-                    result = self._dict_to_hash_result(result_dict, items[futures[future]])
-                    results.append(result)
-                except Exception as e:
-                    idx = futures[future]
-                    results.append(HashResult(
-                        item=items[idx],
-                        error=str(e),
-                    ))
-                
-                completed += 1
-                self._deps.progress.update_phase(completed)
+                for future in done:
+                    try:
+                        result_dict = future.result(timeout=0)
+                        result = self._dict_to_hash_result(result_dict, items[futures[future]])
+                        results.append(result)
+                    except Exception as e:
+                        idx = futures[future]
+                        results.append(HashResult(
+                            item=items[idx],
+                            error=str(e),
+                        ))
+                    
+                    completed += 1
+                    self._deps.progress.update_phase(completed)
+                    
         finally:
-            executor.shutdown(wait=False)
+            # Cancel all pending futures and shutdown immediately
+            for f in futures:
+                f.cancel()
+            executor.shutdown(wait=False, cancel_futures=True)
+            
+            if _interrupted:
+                raise KeyboardInterrupt()
         
         self._deps.progress.info(f"Hashed {len(results)} files")
         self._deps.progress.end_phase()

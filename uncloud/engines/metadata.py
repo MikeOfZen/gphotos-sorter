@@ -219,18 +219,29 @@ class ExifToolMetadataExtractor:
     
     def close(self) -> None:
         """Clean up resources."""
-        if self._pending_commands:
-            self.flush()
-        
-        if self._process:
+        if self._process is None:
+            return
+            
+        try:
+            # Try graceful shutdown first
+            if self._process.poll() is None:  # Process still running
+                try:
+                    self._process.stdin.write("-stay_open\nFalse\n")
+                    self._process.stdin.flush()
+                    self._process.wait(timeout=2)
+                except (BrokenPipeError, OSError):
+                    pass  # Process already dead
+        except Exception:
+            pass
+        finally:
+            # Force kill if still alive
             try:
-                self._process.stdin.write("-stay_open\nFalse\n")
-                self._process.stdin.flush()
-                self._process.wait(timeout=5)
+                if self._process.poll() is None:
+                    self._process.kill()
+                    self._process.wait(timeout=1)
             except Exception:
-                self._process.kill()
-            finally:
-                self._process = None
+                pass
+            self._process = None
     
     def __enter__(self) -> "ExifToolMetadataExtractor":
         return self
