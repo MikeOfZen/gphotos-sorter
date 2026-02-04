@@ -1,251 +1,289 @@
+"""New CLI implementation with dependency injection."""
 from __future__ import annotations
 
-import logging
-import shutil
+import argparse
 import sys
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 
-import typer
-
-from .config import (
-    AppConfig, InputRoot, StorageLayout, 
-    FilenameFormat, YearFormat, MonthFormat, DayFormat
+from .core.config import (
+    SorterConfig,
+    InputSource,
+    OutputLayout,
+    DuplicatePolicy,
+    HashBackend,
 )
-from .scanner import process_media
-from .scanner_mp import process_media_mp
-
-app = typer.Typer(
-    add_completion=True,
-    help="""Media ingestion and organization CLI.
-
-Ingest Google Photos takeout and other photo archives, deduplicate media,
-preserve album tags in EXIF, and store metadata in SQLite.
-"""
-)
+from .core.protocols import ProgressReporter
+from .engines.hash_engine import create_hash_engine
+from .engines.metadata import ExifToolMetadataExtractor
+from .persistence.database import SQLiteMediaRepository
+from .services.scanner import DirectoryScanner
+from .services.deduplicator import DuplicateResolver
+from .services.file_ops import FileManager
+from .services.processor import MediaProcessor, ProcessorDependencies
+from .logging.rich_logger import RichProgressReporter, QuietProgressReporter
 
 
-def setup_logger(verbosity: int) -> logging.Logger:
-    """Setup logger with verbosity level (0=INFO, 1=DEBUG, 2=TRACE)."""
-    logger = logging.getLogger("gphotos_sorter")
-    if verbosity >= 2:
-        logger.setLevel(logging.DEBUG)
-        # Add extra detailed formatting for -vv
-        handler = logging.StreamHandler()
-        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(funcName)s:%(lineno)d] %(message)s"))
-    elif verbosity >= 1:
-        logger.setLevel(logging.DEBUG)
-        handler = logging.StreamHandler()
-        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
-    else:
-        logger.setLevel(logging.INFO)
-        handler = logging.StreamHandler()
-        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
-    logger.handlers = [handler]
-    return logger
-
-
-
-def check_exiftool() -> None:
-    """Check that exiftool is installed and available."""
-    if not shutil.which("exiftool"):
-        typer.secho("ERROR: exiftool is required but not found in PATH.", fg=typer.colors.RED, err=True)
-        typer.secho("Install it with: sudo apt-get install libimage-exiftool-perl", fg=typer.colors.YELLOW, err=True)
-        raise typer.Exit(code=1)
-
-
-
-
-@app.callback(invoke_without_command=True)
-def main_command(
-    ctx: typer.Context,
-    input_path: Optional[List[Path]] = typer.Option(
-        None, "--input", "-i",
-        help="Input path(s) to process. Can specify multiple times."
-    ),
-    owner: str = typer.Option(
-        "Mine", "--owner", "-o",
-        help="Owner label for input paths"
-    ),
-    output_root: Optional[Path] = typer.Option(
-        None, "--output", "-O",
-        help="Output root folder (required)"
-    ),
-    storage_layout: StorageLayout = typer.Option(
-        StorageLayout.year_dash_month, "--layout", "-l",
-        help="Storage layout: single, year/month, or year-month"
-    ),
-    db_path: Optional[Path] = typer.Option(
-        None, "--db",
-        help="SQLite database path (default: output_root/media.sqlite)"
-    ),
-    limit: Optional[int] = typer.Option(
-        None, "--limit", "-n",
-        help="Limit number of files to process (for test runs)"
-    ),
-    no_recursive: bool = typer.Option(
-        False, "--no-recursive",
-        help="Only process files directly in input folders, not subdirectories"
-    ),
-    workers: int = typer.Option(
-        1, "--workers", "-w",
-        help="Number of worker processes (1=single-threaded, >1=multiprocessing)"
-    ),
-    # Filename format options
-    year_format: YearFormat = typer.Option(
-        YearFormat.YYYY, "--year-format",
-        help="Year format in filename: YYYY (2021) or YY (21)"
-    ),
-    month_format: MonthFormat = typer.Option(
-        MonthFormat.MM, "--month-format",
-        help="Month format in filename: MM (06), name (June), or short (Jun)"
-    ),
-    day_format: DayFormat = typer.Option(
-        DayFormat.DD, "--day-format",
-        help="Day format in filename: DD (15) or weekday (15_Tuesday)"
-    ),
-    no_time: bool = typer.Option(
-        False, "--no-time",
-        help="Exclude time (HHMMSS) from filename"
-    ),
-    no_tags: bool = typer.Option(
-        False, "--no-tags",
-        help="Exclude album tags from filename"
-    ),
-    max_tags: Optional[int] = typer.Option(
-        None, "--max-tags",
-        help="Maximum number of tags to include in filename (default: no limit)"
-    ),
-    # File handling options
-    include_non_media: bool = typer.Option(
-        False, "--include-non-media",
-        help="Include non-media files (default: skip them)"
-    ),
-    copy_sidecar: bool = typer.Option(
-        False, "--copy-sidecar",
-        help="Copy sidecar JSON files alongside media"
-    ),
-    no_exif: bool = typer.Option(
-        False, "--no-exif",
-        help="Skip writing metadata to EXIF tags"
-    ),
-    dry_run: bool = typer.Option(
-        False, "--dry-run", "-d",
-        help="Don't actually copy files, just show what would be done"
-    ),
-    verbose: int = typer.Option(
-        0, "--verbose", "-v", count=True,
-        help="Increase verbosity (-v for debug, -vv for trace)"
-    ),
-) -> None:
-    """Process and ingest media files.
-    
-    Scans input directories, deduplicates media using perceptual hashing,
-    extracts dates from EXIF/sidecar/folder names, preserves album info as tags,
-    copies unique files to organized output folders, and writes sidecar metadata to EXIF.
-    """
-    # If no arguments provided, show help
-    if not input_path and not output_root:
-        typer.echo(ctx.get_help())
-        raise typer.Exit()
-    
-    check_exiftool()
-    
-    # Build config from CLI arguments
-    if not input_path:
-        typer.secho("ERROR: At least one --input path is required", fg=typer.colors.RED)
-        raise typer.Exit(code=1)
-    
-    if not output_root:
-        typer.secho("ERROR: --output path is required", fg=typer.colors.RED)
-        raise typer.Exit(code=1)
-    
-    # Build filename format
-    filename_format = FilenameFormat(
-        include_time=not no_time,
-        year_format=year_format,
-        month_format=month_format,
-        day_format=day_format,
-        include_tags=not no_tags,
-        max_tags=max_tags,
+def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        prog="gphotos-sorter",
+        description="Sort and deduplicate Google Photos exports.",
     )
     
-    config = AppConfig(
-        input_roots=[InputRoot(owner=owner, path=p.expanduser().resolve()) for p in input_path],
-        output_root=output_root.expanduser().resolve(),
-        storage_layout=storage_layout,
-        db_path=db_path.expanduser().resolve() if db_path else None,
-        filename_format=filename_format,
-        copy_non_media=include_non_media,
-        copy_sidecar=copy_sidecar,
-        modify_exif=not no_exif,
-        dry_run=dry_run,
+    # Input/Output
+    parser.add_argument(
+        "input_dirs",
+        nargs="+",
+        type=Path,
+        help="Input directories (format: PATH or owner:PATH)",
+    )
+    parser.add_argument(
+        "-o", "--output",
+        type=Path,
+        required=True,
+        help="Output directory",
     )
     
-    logger = setup_logger(verbose)
+    # Layout options
+    parser.add_argument(
+        "--layout",
+        type=str,
+        choices=["year-month", "year-month-day", "flat", "single"],
+        default="year-month",
+        help="Output directory layout (default: year-month)",
+    )
     
-    typer.echo(f"Output: {config.output_root}")
-    typer.echo(f"Layout: {config.storage_layout.value}")
-    typer.echo(f"DB: {config.resolve_db_path()}")
-    for ir in config.input_roots:
-        typer.echo(f"Input [{ir.owner}]: {ir.path}")
-    if limit:
-        typer.echo(f"Limit: {limit} files")
-    if no_recursive:
-        typer.echo("Mode: non-recursive (single folder only)")
-    if workers > 1:
-        typer.echo(f"Workers: {workers} (multiprocessing)")
-    if dry_run:
-        typer.secho("DRY RUN - no files will be copied", fg=typer.colors.YELLOW)
+    # Duplicate handling
+    parser.add_argument(
+        "--duplicates",
+        type=str,
+        choices=["skip", "keep-larger", "keep-smaller", "keep-all"],
+        default="skip",
+        help="How to handle duplicates (default: skip)",
+    )
     
-    # Show filename format if non-default
-    fmt_parts = []
-    if year_format != YearFormat.YYYY:
-        fmt_parts.append(f"year={year_format.value}")
-    if month_format != MonthFormat.MM:
-        fmt_parts.append(f"month={month_format.value}")
-    if day_format != DayFormat.DD:
-        fmt_parts.append(f"day={day_format.value}")
-    if no_time:
-        fmt_parts.append("no-time")
-    if no_tags:
-        fmt_parts.append("no-tags")
-    if max_tags is not None:
-        fmt_parts.append(f"max-tags={max_tags}")
-    if fmt_parts:
-        typer.echo(f"Filename format: {', '.join(fmt_parts)}")
+    # Hash backend
+    parser.add_argument(
+        "--hash-backend",
+        type=str,
+        choices=["auto", "cpu", "gpu-cuda", "gpu-opencl"],
+        default="auto",
+        help="Hash computation backend (default: auto)",
+    )
     
-    # Show file handling options
-    options = []
-    if not include_non_media:
-        options.append("skip-non-media")
-    if copy_sidecar:
-        options.append("copy-sidecar")
-    if no_exif:
-        options.append("no-exif")
-    if options:
-        typer.echo(f"Options: {', '.join(options)}")
-    elif include_non_media:
-        typer.echo("Non-media files: copy with warning")
+    # Processing options
+    parser.add_argument(
+        "-j", "--jobs",
+        type=int,
+        default=None,
+        help="Number of parallel jobs (default: CPU count)",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=100,
+        help="Batch size for processing (default: 100)",
+    )
     
-    typer.echo("---")
+    # Output options
+    parser.add_argument(
+        "-v", "--verbose",
+        action="store_true",
+        help="Enable verbose output",
+    )
+    parser.add_argument(
+        "-q", "--quiet",
+        action="store_true",
+        help="Suppress non-essential output",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be done without copying",
+    )
     
-    if workers > 1:
-        process_media_mp(config, logger, limit=limit, recursive=not no_recursive, num_workers=workers)
-    else:
-        stats = process_media(config, logger, limit=limit, recursive=not no_recursive)
-        
-        # Show summary with color coding
-        if stats["errors"] > 0:
-            typer.secho(f"\n⚠ Completed with {stats['errors']} errors", fg=typer.colors.YELLOW)
+    # Database
+    parser.add_argument(
+        "--db",
+        type=Path,
+        default=None,
+        help="Path to database file (default: OUTPUT/.gphotos-sorter.db)",
+    )
+    
+    return parser.parse_args(argv)
+
+
+def parse_input_sources(input_dirs: list[Path]) -> tuple[InputSource, ...]:
+    """Parse input directories with optional owner prefix."""
+    sources = []
+    for inp in input_dirs:
+        inp_str = str(inp)
+        if ":" in inp_str and not inp_str.startswith("/"):
+            # Format: owner:path
+            owner, path_str = inp_str.split(":", 1)
+            sources.append(InputSource(path=Path(path_str), owner=owner))
         else:
-            typer.secho(f"\n✓ Completed successfully", fg=typer.colors.GREEN)
+            sources.append(InputSource(path=inp))
+    return tuple(sources)
 
 
+def layout_from_string(s: str) -> OutputLayout:
+    """Convert string to OutputLayout enum."""
+    mapping = {
+        "year-month": OutputLayout.YEAR_MONTH,
+        "year-month-day": OutputLayout.YEAR_MONTH_DAY,
+        "flat": OutputLayout.FLAT,
+        "single": OutputLayout.SINGLE,
+    }
+    return mapping[s]
 
-def main() -> None:
-    app()
+
+def policy_from_string(s: str) -> DuplicatePolicy:
+    """Convert string to DuplicatePolicy enum."""
+    mapping = {
+        "skip": DuplicatePolicy.SKIP,
+        "keep-larger": DuplicatePolicy.KEEP_HIGHER_RESOLUTION,
+        "keep-smaller": DuplicatePolicy.KEEP_FIRST,  # Fallback
+        "keep-all": DuplicatePolicy.KEEP_BOTH,
+    }
+    return mapping[s]
+
+
+def backend_from_string(s: str) -> HashBackend:
+    """Convert string to HashBackend enum."""
+    mapping = {
+        "auto": HashBackend.AUTO,
+        "cpu": HashBackend.CPU,
+        "gpu-cuda": HashBackend.GPU_CUDA,
+        "gpu-opencl": HashBackend.GPU_OPENCL,
+    }
+    return mapping[s]
+
+
+def build_config(args: argparse.Namespace) -> SorterConfig:
+    """Build SorterConfig from parsed arguments."""
+    input_sources = parse_input_sources(args.input_dirs)
+    
+    db_path = args.db
+    if db_path is None:
+        db_path = args.output / ".gphotos-sorter.db"
+    
+    return SorterConfig(
+        output_root=args.output,
+        inputs=input_sources,
+        layout=layout_from_string(args.layout),
+        duplicate_policy=policy_from_string(args.duplicates),
+        hash_backend=backend_from_string(args.hash_backend),
+        workers=args.jobs or 4,
+        batch_size=args.batch_size,
+        dry_run=args.dry_run,
+        db_path=db_path,
+    )
+
+
+def create_dependencies(
+    config: SorterConfig,
+    reporter: ProgressReporter,
+) -> ProcessorDependencies:
+    """Create all dependencies for the processor."""
+    # Create hash engine
+    hash_engine = create_hash_engine(config.hash_backend)
+    
+    # Create metadata extractor
+    metadata_extractor = ExifToolMetadataExtractor()
+    
+    # Create repository
+    assert config.db_path is not None
+    repository = SQLiteMediaRepository(config.db_path)
+    
+    # Create services
+    scanner = DirectoryScanner()
+    deduplicator = DuplicateResolver(policy=config.duplicate_policy)
+    file_manager = FileManager(
+        output_root=config.output_root,
+        layout=config.layout,
+        dry_run=config.dry_run,
+    )
+    
+    return ProcessorDependencies(
+        hash_engine=hash_engine,
+        metadata_extractor=metadata_extractor,
+        repository=repository,
+        scanner=scanner,
+        deduplicator=deduplicator,
+        file_manager=file_manager,
+        progress=reporter,
+    )
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    """Main entry point."""
+    args = parse_args(argv)
+    
+    # Create reporter based on verbosity settings
+    if args.quiet:
+        reporter = QuietProgressReporter()
+    else:
+        reporter = RichProgressReporter(verbose=args.verbose)
+    
+    try:
+        # Build configuration
+        config = build_config(args)
+        
+        # Print header and config
+        reporter.print_header("Google Photos Sorter")
+        reporter.print_config({
+            "Input Sources": ", ".join(str(s.path) for s in config.inputs),
+            "Output Directory": str(config.output_root),
+            "Layout": config.layout.value,
+            "Duplicate Policy": config.duplicate_policy.value,
+            "Hash Backend": config.hash_backend.value,
+            "Workers": config.workers,
+            "Dry Run": config.dry_run,
+        })
+        
+        # Create dependencies
+        deps = create_dependencies(config, reporter)
+        
+        # Create and run processor
+        processor = MediaProcessor(config=config, deps=deps)
+        
+        try:
+            stats = processor.process()
+            
+            # Print final stats
+            reporter.print_stats(stats)
+            
+            return 0 if stats.errors == 0 else 1
+            
+        except KeyboardInterrupt:
+            reporter.warning("\nShutting down gracefully...")
+            reporter.info("Flushing pending operations...")
+            raise
+            
+        finally:
+            # Cleanup
+            try:
+                deps.metadata_extractor.flush()
+                deps.metadata_extractor.close()
+            except Exception:
+                pass
+            try:
+                deps.repository.close()
+            except Exception:
+                pass
+    
+    except KeyboardInterrupt:
+        reporter.warning("Shutdown complete. Run again to resume.")
+        return 130
+    except Exception as e:
+        reporter.error(f"Fatal error: {e}")
+        if args.verbose:
+            import traceback
+            traceback.print_exc()
+        return 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

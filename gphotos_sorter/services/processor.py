@@ -1,6 +1,7 @@
 """Main media processor - orchestrates all services."""
 from __future__ import annotations
 
+import signal
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +16,16 @@ from ..core.protocols import (
 from .scanner import DirectoryScanner
 from .deduplicator import DuplicateResolver
 from .file_ops import FileManager
+
+
+# Global interrupt flag
+_interrupted = False
+
+
+def _signal_handler(signum, frame):
+    """Handle SIGINT gracefully."""
+    global _interrupted
+    _interrupted = True
 
 
 @dataclass
@@ -93,44 +104,75 @@ class MediaProcessor:
         self._config = config
         self._deps = deps
         self._stats = ProcessingStats()
+        
+        # Set up signal handler for graceful shutdown
+        global _interrupted
+        _interrupted = False
+        signal.signal(signal.SIGINT, _signal_handler)
     
     def process(self) -> ProcessingStats:
         """Run the full processing pipeline.
         
         Returns:
             Statistics about what was processed.
+        
+        Raises:
+            KeyboardInterrupt: If interrupted by user.
         """
-        # Phase 0: Crash recovery
-        self._recover_from_crash()
+        global _interrupted
         
-        # Phase 1: Scan and collect items
-        items = self._scan_items()
-        self._stats.total_files = len(items)
-        
-        if not items:
-            self._deps.progress.info("No files to process")
+        try:
+            # Phase 0: Crash recovery
+            self._recover_from_crash()
+            
+            # Phase 1: Scan and collect items
+            items = self._scan_items()
+            self._stats.total_files = len(items)
+            
+            if not items:
+                self._deps.progress.info("No files to process")
+                return self._stats
+            
+            # Apply limit if set
+            if self._config.limit:
+                items = items[:self._config.limit]
+                self._stats.total_files = len(items)
+            
+            # Check for interrupt
+            if _interrupted:
+                raise KeyboardInterrupt()
+            
+            # Phase 2: Hash all items
+            hash_results = self._hash_phase(items)
+            
+            # Check for interrupt
+            if _interrupted:
+                raise KeyboardInterrupt()
+            
+            # Phase 3: Dedupe and plan copies
+            copy_plans = self._plan_copies(hash_results)
+            
+            # Check for interrupt
+            if _interrupted:
+                raise KeyboardInterrupt()
+            
+            # Phase 4: Execute copies
+            if not self._config.dry_run:
+                self._copy_phase(copy_plans)
+            else:
+                self._deps.progress.info(
+                    f"DRY RUN: Would copy {len(copy_plans)} files"
+                )
+            
             return self._stats
         
-        # Apply limit if set
-        if self._config.limit:
-            items = items[:self._config.limit]
-            self._stats.total_files = len(items)
-        
-        # Phase 2: Hash all items
-        hash_results = self._hash_phase(items)
-        
-        # Phase 3: Dedupe and plan copies
-        copy_plans = self._plan_copies(hash_results)
-        
-        # Phase 4: Execute copies
-        if not self._config.dry_run:
-            self._copy_phase(copy_plans)
-        else:
-            self._deps.progress.info(
-                f"DRY RUN: Would copy {len(copy_plans)} files"
+        except KeyboardInterrupt:
+            # Clean up any partial state
+            self._deps.progress.warning(
+                f"Interrupted. Processed {self._stats.copied + self._stats.skipped_duplicate} "
+                f"of {self._stats.total_files} files."
             )
-        
-        return self._stats
+            raise
     
     def _recover_from_crash(self) -> None:
         """Clean up any pending operations from a previous crash."""
@@ -169,6 +211,8 @@ class MediaProcessor:
     
     def _hash_phase(self, items: list[MediaItem]) -> list[HashResult]:
         """Phase 1: Hash all items using multiprocessing."""
+        global _interrupted
+        
         self._deps.progress.start_phase("Hashing", len(items))
         
         # Convert items to dicts for pickling
@@ -194,6 +238,13 @@ class MediaProcessor:
             
             completed = 0
             for future in as_completed(futures):
+                # Check for interrupt
+                if _interrupted:
+                    # Cancel pending futures
+                    for f in futures:
+                        f.cancel()
+                    raise KeyboardInterrupt()
+                
                 try:
                     result_dict = future.result()
                     result = self._dict_to_hash_result(result_dict, items[futures[future]])
@@ -243,6 +294,10 @@ class MediaProcessor:
         plans: list[CopyPlan] = []
         
         for group in groups:
+            # Check for interrupt
+            if _interrupted:
+                raise KeyboardInterrupt()
+            
             # Check if hash exists in database
             existing = self._deps.repository.get_by_hash(group.hash_value)
             
@@ -281,9 +336,15 @@ class MediaProcessor:
     
     def _copy_phase(self, plans: list[CopyPlan]) -> None:
         """Phase 2: Execute copy plans."""
+        global _interrupted
+        
         self._deps.progress.start_phase("Copying", len(plans))
         
         for i, plan in enumerate(plans):
+            # Check for interrupt
+            if _interrupted:
+                raise KeyboardInterrupt()
+            
             try:
                 # Track pending operation for crash recovery
                 op_id = self._deps.repository.add_pending_operation(
