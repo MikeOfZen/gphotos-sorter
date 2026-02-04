@@ -143,6 +143,54 @@ class TestSQLiteMediaRepository:
         assert retrieved is not None
         assert retrieved.width == 1920
     
+    def test_batch_upsert(self, repo):
+        """Test batch inserting multiple records."""
+        records = [
+            MediaRecord(
+                canonical_path=f"/output/photo{i}.jpg",
+                similarity_hash=f"phash:{i}",
+                owner="alice",
+                width=1920,
+            )
+            for i in range(100)
+        ]
+        
+        # Batch insert
+        repo.batch_upsert(records)
+        
+        # Verify all were inserted
+        for i in range(100):
+            retrieved = repo.get_by_hash(f"phash:{i}")
+            assert retrieved is not None
+            assert retrieved.canonical_path == f"/output/photo{i}.jpg"
+            assert retrieved.owner == "alice"
+    
+    def test_batch_upsert_empty(self, repo):
+        """Test batch_upsert with empty list does nothing."""
+        repo.batch_upsert([])  # Should not error
+    
+    def test_batch_upsert_update(self, repo):
+        """Test batch_upsert updates existing records."""
+        # Insert initial records
+        records1 = [
+            MediaRecord(canonical_path=f"/photo{i}.jpg", similarity_hash=f"hash{i}", width=640)
+            for i in range(5)
+        ]
+        repo.batch_upsert(records1)
+        
+        # Update with new data
+        records2 = [
+            MediaRecord(canonical_path=f"/photo{i}.jpg", similarity_hash=f"newhash{i}", width=1920)
+            for i in range(5)
+        ]
+        repo.batch_upsert(records2)
+        
+        # Verify updates
+        for i in range(5):
+            retrieved = repo.get_by_hash(f"newhash{i}")
+            assert retrieved is not None
+            assert retrieved.width == 1920
+    
     def test_context_manager(self, db_path):
         """Test repository as context manager."""
         with SQLiteMediaRepository(db_path) as repo:

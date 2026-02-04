@@ -53,6 +53,7 @@ class IndexRebuilder:
         hash_engine: HashEngine,
         progress: ProgressReporter,
         workers: int = 4,
+        batch_size: int = 64,
     ):
         """Initialize the rebuilder.
         
@@ -60,9 +61,11 @@ class IndexRebuilder:
             hash_engine: Engine for computing file hashes.
             progress: Reporter for progress updates.
             workers: Number of parallel workers for hashing.
+            batch_size: Number of records to batch before DB write (0=disable).
         """
         self._hash_engine = hash_engine
         self._progress = progress
+        self._batch_size = batch_size
         self._workers = workers
     
     def scan_media_files(self, directory: Path) -> list[Path]:
@@ -221,57 +224,100 @@ class IndexRebuilder:
         self._progress.start_phase("Indexing", stats.total_files)
         
         completed = 0
-        with ThreadPoolExecutor(max_workers=self._workers) as executor:
+        batch: list[MediaRecord] = []
+        
+        def flush_batch():
+            """Flush accumulated batch to database."""
+            if not batch:
+                return
+            repository.batch_upsert(batch)
+            batch.clear()
+        
+        executor = ThreadPoolExecutor(max_workers=self._workers)
+        try:
             futures = {executor.submit(hash_file, fp): fp for fp in media_files}
+            pending = set(futures.keys())
             
-            for future in as_completed(futures):
-                file_path, hash_value, err_msg, from_meta = future.result()
-                completed += 1
-                
-                if from_meta:
-                    from_metadata_count += 1
-                elif hash_value:
-                    computed_count += 1
-                
-                # Update progress bar with total completed
-                self._progress.update_phase(completed)
-                
-                # Handle errors
-                if not hash_value:
-                    stats.errors += 1
-                    if len(first_errors) < 5:
-                        first_errors.append((file_path, err_msg))
-                    continue
-                
-                # Track duplicates for reporting (but still insert all)
-                if hash_value in duplicates:
-                    duplicates[hash_value].append(file_path)
-                    stats.skipped_duplicates += 1  # Count as duplicate but still insert
-                else:
-                    duplicates[hash_value] = [file_path]
-                
-                # Extract owner from path structure
-                owner = self._extract_owner(file_path, output_dir)
-                
-                # Create and insert record - DB indexes ALL files on filesystem
-                # (duplicates have same hash but different canonical_path)
-                record = MediaRecord(
-                    canonical_path=str(file_path),
-                    similarity_hash=hash_value,
-                    owner=owner,
-                    date_taken=None,
-                    tags="",
-                    width=None,
-                    height=None,
-                    source_paths=str(file_path),
+            while pending:
+                # Wait for completions with timeout for interrupt checking
+                import concurrent.futures
+                done, pending = concurrent.futures.wait(
+                    pending, timeout=0.5,
+                    return_when=concurrent.futures.FIRST_COMPLETED
                 )
                 
-                try:
-                    repository.upsert(record)
-                    stats.inserted += 1
-                except Exception as e:
-                    self._progress.warning(f"DB error for {file_path}: {e}")
-                    stats.errors += 1
+                for future in done:
+                    try:
+                        file_path, hash_value, err_msg, from_meta = future.result(timeout=0)
+                        completed += 1
+                        
+                        if from_meta:
+                            from_metadata_count += 1
+                        elif hash_value:
+                            computed_count += 1
+                        
+                        # Update progress bar with total completed
+                        self._progress.update_phase(completed)
+                        
+                        # Handle errors
+                        if not hash_value:
+                            stats.errors += 1
+                            if len(first_errors) < 5:
+                                first_errors.append((file_path, err_msg))
+                            continue
+                        
+                        # Track duplicates for reporting (but still insert all)
+                        if hash_value in duplicates:
+                            duplicates[hash_value].append(file_path)
+                            stats.skipped_duplicates += 1  # Count as duplicate but still insert
+                        else:
+                            duplicates[hash_value] = [file_path]
+                        
+                        # Extract owner from path structure
+                        owner = self._extract_owner(file_path, output_dir)
+                        
+                        # Create record - DB indexes ALL files on filesystem
+                        # (duplicates have same hash but different canonical_path)
+                        record = MediaRecord(
+                            canonical_path=str(file_path),
+                            similarity_hash=hash_value,
+                            owner=owner,
+                            date_taken=None,
+                            tags="",
+                            width=None,
+                            height=None,
+                            source_paths=str(file_path),
+                        )
+                        
+                        # Add to batch
+                        if self._batch_size > 0:
+                            batch.append(record)
+                            stats.inserted += 1
+                            # Flush when batch is full
+                            if len(batch) >= self._batch_size:
+                                flush_batch()
+                        else:
+                            # Batching disabled, insert immediately
+                            repository.upsert(record)
+                            stats.inserted += 1
+                    except KeyboardInterrupt:
+                        raise
+                    except Exception as e:
+                        self._progress.warning(f"Error: {e}")
+                        stats.errors += 1
+            
+            # Flush any remaining records in batch
+            flush_batch()
+        except KeyboardInterrupt:
+            # Flush what we have so far
+            flush_batch()
+            # Cancel all pending futures
+            for f in pending:
+                f.cancel()
+            self._progress.end_phase()
+            raise
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
         
         # End progress tracking
         self._progress.end_phase()

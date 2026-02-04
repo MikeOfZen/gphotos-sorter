@@ -129,6 +129,12 @@ def create_parser() -> argparse.ArgumentParser:
         help="Number of worker threads (default: 32)",
     )
     index_parser.add_argument(
+        "-b", "--batch-size",
+        type=int,
+        default=64,
+        help="Number of records to batch before writing to DB (default: 64, 0=disable)",
+    )
+    index_parser.add_argument(
         "--hash-backend",
         choices=["auto", "cpu", "gpu-cuda"],
         default="cpu",
@@ -380,6 +386,7 @@ def cmd_index(args: argparse.Namespace, reporter) -> int:
         hash_engine=hash_engine,
         progress=reporter,
         workers=args.workers,
+        batch_size=args.batch_size,
     )
     
     stats = rebuilder.rebuild(
@@ -618,7 +625,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             return 1
             
     except KeyboardInterrupt:
-        reporter.warning("\nInterrupted.")
+        # Clean exit on Ctrl+C - no stack trace
         return 130
     except Exception as e:
         reporter.error(f"Error: {e}")

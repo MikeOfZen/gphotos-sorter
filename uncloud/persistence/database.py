@@ -212,6 +212,67 @@ class SQLiteMediaRepository:
         
         self._conn.commit()
     
+    def batch_upsert(self, records: list[MediaRecord]) -> None:
+        """Insert or update multiple records in a single transaction."""
+        if not records:
+            return
+        
+        assert self._conn is not None
+        cursor = self._conn.cursor()
+        
+        # Batch insert media records
+        cursor.executemany("""
+            INSERT INTO media (
+                canonical_path, similarity_hash, owner, date_taken,
+                tags, width, height, source_paths, 
+                faces_hashes, ai_desc, objects, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(canonical_path) DO UPDATE SET
+                similarity_hash = excluded.similarity_hash,
+                owner = excluded.owner,
+                date_taken = excluded.date_taken,
+                tags = excluded.tags,
+                width = excluded.width,
+                height = excluded.height,
+                source_paths = excluded.source_paths,
+                faces_hashes = excluded.faces_hashes,
+                ai_desc = excluded.ai_desc,
+                objects = excluded.objects,
+                updated_at = CURRENT_TIMESTAMP
+        """, [
+            (
+                record.canonical_path,
+                record.similarity_hash,
+                record.owner,
+                record.date_taken.isoformat() if record.date_taken else None,
+                record.tags,
+                record.width,
+                record.height,
+                record.source_paths,
+                record.faces_hashes,
+                record.ai_desc,
+                record.objects,
+            )
+            for record in records
+        ])
+        
+        # Update source path index for all records
+        source_path_data = []
+        for record in records:
+            if record.source_paths:
+                for path in record.source_paths.split(","):
+                    path = path.strip()
+                    if path:
+                        source_path_data.append((path, record.similarity_hash))
+        
+        if source_path_data:
+            cursor.executemany("""
+                INSERT OR REPLACE INTO source_path_index (path, media_hash)
+                VALUES (?, ?)
+            """, source_path_data)
+        
+        self._conn.commit()
+    
     def add_pending_operation(
         self, 
         source: str, 
