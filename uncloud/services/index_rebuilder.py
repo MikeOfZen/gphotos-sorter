@@ -220,19 +220,21 @@ class IndexRebuilder:
         # Start progress tracking
         self._progress.start_phase("Indexing", stats.total_files)
         
+        completed = 0
         with ThreadPoolExecutor(max_workers=self._workers) as executor:
             futures = {executor.submit(hash_file, fp): fp for fp in media_files}
             
             for future in as_completed(futures):
                 file_path, hash_value, err_msg, from_meta = future.result()
+                completed += 1
                 
                 if from_meta:
                     from_metadata_count += 1
                 elif hash_value:
                     computed_count += 1
                 
-                # Update progress bar
-                self._progress.update_phase(1)
+                # Update progress bar with total completed
+                self._progress.update_phase(completed)
                 
                 # Handle errors
                 if not hash_value:
