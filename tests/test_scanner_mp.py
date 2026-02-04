@@ -1,9 +1,7 @@
 """Unit tests for multiprocessing scanner module."""
 import os
-import pytest
 import logging
 import tempfile
-from datetime import datetime
 from pathlib import Path
 
 from PIL import Image
@@ -44,7 +42,6 @@ class TestSourcePathSkipping:
         # Create test images
         img1_path = self._create_test_image(self.input_dir / "album1" / "photo1.jpg")
         img2_path = self._create_test_image(self.input_dir / "album1" / "photo2.jpg")
-        img3_path = self._create_test_image(self.input_dir / "album2" / "photo3.jpg")
 
         # Pre-populate database with img1 and img2 as "known"
         db = MediaDatabase(self.db_path)

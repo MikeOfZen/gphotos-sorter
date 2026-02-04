@@ -18,6 +18,8 @@ class MediaRecord:
     source_paths: list[str]
     status: str
     notes: Optional[str]
+    width: Optional[int] = None
+    height: Optional[int] = None
 
 
 class MediaDatabase:
@@ -44,7 +46,9 @@ class MediaDatabase:
                 tags TEXT,
                 source_paths TEXT,
                 status TEXT,
-                notes TEXT
+                notes TEXT,
+                width INTEGER,
+                height INTEGER
             )
             """
         )
@@ -55,7 +59,7 @@ class MediaDatabase:
 
     def get_by_hash(self, similarity_hash: str) -> Optional[MediaRecord]:
         cursor = self.connection.execute(
-            "SELECT similarity_hash, canonical_path, owner, date_taken, date_source, tags, source_paths, status, notes FROM media WHERE similarity_hash = ?",
+            "SELECT similarity_hash, canonical_path, owner, date_taken, date_source, tags, source_paths, status, notes, width, height FROM media WHERE similarity_hash = ?",
             (similarity_hash,),
         )
         row = cursor.fetchone()
@@ -73,14 +77,16 @@ class MediaDatabase:
             source_paths=source_paths,
             status=row[7],
             notes=row[8],
+            width=row[9],
+            height=row[10],
         )
 
     def upsert(self, record: MediaRecord) -> None:
         self.connection.execute(
             """
             INSERT INTO media (
-                similarity_hash, canonical_path, owner, date_taken, date_source, tags, source_paths, status, notes
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                similarity_hash, canonical_path, owner, date_taken, date_source, tags, source_paths, status, notes, width, height
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(similarity_hash) DO UPDATE SET
                 canonical_path = excluded.canonical_path,
                 owner = excluded.owner,
@@ -89,7 +95,9 @@ class MediaDatabase:
                 tags = excluded.tags,
                 source_paths = excluded.source_paths,
                 status = excluded.status,
-                notes = excluded.notes
+                notes = excluded.notes,
+                width = excluded.width,
+                height = excluded.height
             """,
             (
                 record.similarity_hash,
@@ -101,6 +109,8 @@ class MediaDatabase:
                 json.dumps(sorted(set(record.source_paths))),
                 record.status,
                 record.notes,
+                record.width,
+                record.height,
             ),
         )
         self.connection.commit()

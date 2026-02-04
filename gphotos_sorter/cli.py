@@ -10,7 +10,7 @@ import typer
 
 from .config import (
     AppConfig, InputRoot, StorageLayout, 
-    FilenameFormat, YearFormat, MonthFormat, DayFormat
+    FilenameFormat, YearFormat, MonthFormat, DayFormat, DuplicatePolicy
 )
 from .scanner import process_media
 from .scanner_mp import process_media_mp
@@ -129,6 +129,10 @@ def main_command(
         False, "--no-exif",
         help="Skip writing metadata to EXIF tags"
     ),
+    duplicate_policy: DuplicatePolicy = typer.Option(
+        DuplicatePolicy.keep_first, "--duplicate-policy",
+        help="Policy for handling duplicates: keep-first (default) or keep-higher-resolution"
+    ),
     dry_run: bool = typer.Option(
         False, "--dry-run", "-d",
         help="Don't actually copy files, just show what would be done"
@@ -180,6 +184,7 @@ def main_command(
         copy_sidecar=copy_sidecar,
         modify_exif=not no_exif,
         dry_run=dry_run,
+        duplicate_policy=duplicate_policy,
     )
     
     logger = setup_logger(verbose)
@@ -223,6 +228,8 @@ def main_command(
         options.append("copy-sidecar")
     if no_exif:
         options.append("no-exif")
+    if duplicate_policy != DuplicatePolicy.keep_first:
+        options.append(f"duplicate-policy={duplicate_policy.value}")
     if options:
         typer.echo(f"Options: {', '.join(options)}")
     elif include_non_media:

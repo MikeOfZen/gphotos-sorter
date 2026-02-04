@@ -12,10 +12,10 @@ from pathlib import Path
 from queue import Empty
 from typing import Optional
 
-from .config import AppConfig, StorageLayout, FilenameFormat, YearFormat, MonthFormat, DayFormat
+from .config import AppConfig, StorageLayout, FilenameFormat, YearFormat, MonthFormat, DayFormat, DuplicatePolicy
 from .date_utils import is_date_folder, parse_date_from_folder
 from .db import MediaDatabase, MediaRecord
-from .hash_utils import compute_hash
+from .hash_utils import compute_hash, get_image_resolution
 from .metadata_utils import (
     extract_exif_datetime,
     extract_sidecar_datetime,
@@ -276,6 +276,9 @@ def worker_process(
                     output_dir.mkdir(parents=True, exist_ok=True)
                 canonical_path = find_unique_filename(output_dir, date_taken, work_item.tags, work_item.path.suffix, fmt)
                 
+                # Get image resolution before copying
+                width, height = get_image_resolution(work_item.path)
+                
                 # Copy file
                 if not dry_run:
                     shutil.copy2(work_item.path, canonical_path)
@@ -314,6 +317,8 @@ def worker_process(
                     source_paths=[str(work_item.path)],
                     status=status,
                     notes=None if not sidecar_extra else "sidecar_copied",
+                    width=width,
+                    height=height,
                 )
                 result_queue.put(WorkResult(record=record, action="insert"))
                 
@@ -340,6 +345,7 @@ def writer_process(
     db_path: Path,
     total_items: int,
     stop_event: mp.Event,
+    duplicate_policy: str = "keep-first",
 ):
     """Single writer process that handles all DB operations."""
     database = MediaDatabase(db_path)
@@ -366,18 +372,50 @@ def writer_process(
                 # Check if this hash already exists
                 existing = database.get_by_hash(result.record.similarity_hash)
                 if existing:
-                    # Duplicate - update tags/sources, delete the copied file
-                    database.update_existing(
-                        result.record.similarity_hash,
-                        result.record.tags,
-                        result.record.source_paths,
-                    )
-                    # Remove the file we just copied (it's a duplicate)
-                    try:
-                        Path(result.record.canonical_path).unlink()
-                    except Exception:
-                        pass
-                    skipped += 1
+                    # Duplicate found - check policy
+                    if duplicate_policy == "keep-higher-resolution":
+                        # Compare resolutions
+                        new_width, new_height = result.record.width, result.record.height
+                        existing_width, existing_height = existing.width, existing.height
+                        
+                        new_pixels = (new_width * new_height) if new_width and new_height else 0
+                        existing_pixels = (existing_width * existing_height) if existing_width and existing_height else 0
+                        
+                        if new_pixels > existing_pixels:
+                            # New file has higher resolution - replace
+                            try:
+                                Path(existing.canonical_path).unlink(missing_ok=True)
+                            except Exception:
+                                pass
+                            # Update DB with new file
+                            database.upsert(result.record)
+                            processed += 1
+                        else:
+                            # Keep existing (same or higher resolution)
+                            database.update_existing(
+                                result.record.similarity_hash,
+                                result.record.tags,
+                                result.record.source_paths,
+                            )
+                            # Remove the newly copied file (it's lower resolution)
+                            try:
+                                Path(result.record.canonical_path).unlink(missing_ok=True)
+                            except Exception:
+                                pass
+                            skipped += 1
+                    else:
+                        # Default: keep first
+                        database.update_existing(
+                            result.record.similarity_hash,
+                            result.record.tags,
+                            result.record.source_paths,
+                        )
+                        # Remove the file we just copied (it's a duplicate)
+                        try:
+                            Path(result.record.canonical_path).unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                        skipped += 1
                 else:
                     database.upsert(result.record)
                     processed += 1
@@ -428,6 +466,7 @@ def process_media_mp(
     
     # Get config options
     copy_non_media = config.copy_non_media
+    duplicate_policy = config.duplicate_policy.value
     fmt = config.filename_format or FilenameFormat()
     
     # Collect all work items, filtering out known sources
@@ -512,7 +551,7 @@ def process_media_mp(
     # Start writer process
     writer = mp.Process(
         target=writer_process,
-        args=(result_queue, stats_dict, db_path, total_items, stop_event),
+        args=(result_queue, stats_dict, db_path, total_items, stop_event, duplicate_policy),
     )
     writer.start()
     

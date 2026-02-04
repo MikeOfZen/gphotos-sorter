@@ -1,5 +1,4 @@
 """Entry point for PyInstaller executable."""
-import sys
 from pathlib import Path
 
 # Add the package to the path

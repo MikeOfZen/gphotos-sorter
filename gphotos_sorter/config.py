@@ -32,6 +32,12 @@ class DayFormat(str, Enum):
     weekday = "weekday" # 15_Tuesday
 
 
+class DuplicatePolicy(str, Enum):
+    """Policy for handling duplicate files with different resolutions."""
+    keep_first = "keep-first"                      # Keep the first file encountered (current behavior)
+    keep_higher_resolution = "keep-higher-resolution"  # Keep the file with higher resolution
+
+
 class FilenameFormat(BaseModel):
     """Configurable filename format."""
     include_time: bool = Field(default=True, description="Include time (HHMMSS) in filename")
@@ -92,6 +98,10 @@ class AppConfig(BaseModel):
     dry_run: bool = Field(
         default=False,
         description="Don't actually copy files, just show what would be done"
+    )
+    duplicate_policy: DuplicatePolicy = Field(
+        default=DuplicatePolicy.keep_first,
+        description="Policy for handling duplicates with different resolutions"
     )
 
     @field_validator("output_root")

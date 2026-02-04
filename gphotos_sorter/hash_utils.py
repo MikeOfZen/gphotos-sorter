@@ -30,3 +30,14 @@ def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
         for chunk in iter(lambda: handle.read(chunk_size), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def get_image_resolution(path: Path) -> tuple[Optional[int], Optional[int]]:
+    """Get image width and height, returns (width, height) or (None, None) if unable to read."""
+    try:
+        if is_image(path):
+            with Image.open(path) as image:
+                return image.size  # Returns (width, height)
+        return None, None
+    except Exception:
+        return None, None
