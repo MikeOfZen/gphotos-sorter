@@ -30,6 +30,7 @@ class FileManager:
         output_root: Path, 
         layout: OutputLayout,
         dry_run: bool = False,
+        owner_folder: Optional[str] = None,
     ):
         """Initialize file manager.
         
@@ -37,10 +38,12 @@ class FileManager:
             output_root: Root directory for output.
             layout: How to organize files.
             dry_run: If True, don't actually copy files.
+            owner_folder: Optional top-level owner name.
         """
         self._output_root = output_root
         self._layout = layout
         self._dry_run = dry_run
+        self._owner_folder = owner_folder
     
     def copy_file(self, source: Path, target: Path) -> bool:
         """Copy a file with metadata preservation.
@@ -108,26 +111,29 @@ class FileManager:
         Returns:
             Full path to output directory.
         """
+        # Start with owner folder if specified
+        base = self._output_root / self._owner_folder if self._owner_folder else self._output_root
+        
         if date_taken is None:
-            return self._output_root / "unknown"
+            return base / "unknown"
         
         year = str(date_taken.year)
         month = f"{date_taken.month:02d}"
         day = f"{date_taken.day:02d}"
         
         if self._layout == OutputLayout.YEAR_MONTH:
-            return self._output_root / year / f"{year}-{month}"
+            return base / year / f"{year}-{month}"
         
         if self._layout == OutputLayout.YEAR_MONTH_DAY:
-            return self._output_root / year / f"{year}-{month}" / f"{year}-{month}-{day}"
+            return base / year / f"{year}-{month}" / f"{year}-{month}-{day}"
         
         if self._layout == OutputLayout.FLAT:
-            return self._output_root
+            return base
         
         if self._layout == OutputLayout.SINGLE:
-            return self._output_root / "processed"
+            return base / "processed"
         
-        return self._output_root / year / f"{year}-{month}"
+        return base / year / f"{year}-{month}"
     
     def build_filename(
         self,

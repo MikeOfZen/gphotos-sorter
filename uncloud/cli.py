@@ -53,6 +53,12 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         default="year-month",
         help="Output directory layout (default: year-month)",
     )
+    parser.add_argument(
+        "--owner",
+        type=str,
+        default=None,
+        help="Optional top-level owner/folder name (e.g., 'Mine', 'Family')",
+    )
     
     # Duplicate handling
     parser.add_argument(
@@ -179,6 +185,7 @@ def build_config(args: argparse.Namespace) -> SorterConfig:
         batch_size=args.batch_size,
         dry_run=args.dry_run,
         db_path=db_path,
+        owner_folder=args.owner,
     )
 
 
@@ -204,6 +211,7 @@ def create_dependencies(
         output_root=config.output_root,
         layout=config.layout,
         dry_run=config.dry_run,
+        owner_folder=config.owner_folder,
     )
     
     return ProcessorDependencies(
@@ -233,7 +241,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         
         # Print header and config
         reporter.print_header("Google Photos Sorter")
-        reporter.print_config({
+        config_dict = {
             "Input Sources": ", ".join(str(s.path) for s in config.inputs),
             "Output Directory": str(config.output_root),
             "Layout": config.layout.value,
@@ -241,7 +249,10 @@ def main(argv: Optional[list[str]] = None) -> int:
             "Hash Backend": config.hash_backend.value,
             "Workers": config.workers,
             "Dry Run": config.dry_run,
-        })
+        }
+        if config.owner_folder:
+            config_dict["Owner Folder"] = config.owner_folder
+        reporter.print_config(config_dict)
         
         # Create dependencies
         deps = create_dependencies(config, reporter)

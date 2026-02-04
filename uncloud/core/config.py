@@ -78,6 +78,7 @@ class SorterConfig:
     # Output organization
     layout: OutputLayout = OutputLayout.YEAR_MONTH
     filename_format: FilenameFormat = field(default_factory=FilenameFormat)
+    owner_folder: Optional[str] = None  # Optional top-level owner name
     
     # Processing options
     duplicate_policy: DuplicatePolicy = DuplicatePolicy.KEEP_HIGHER_RESOLUTION
