@@ -195,11 +195,6 @@ class IndexRebuilder:
         from_metadata_count = 0
         computed_count = 0
         
-        self._progress.info(
-            f"Indexing {len(media_files)} files with {self._workers} workers..."
-        )
-        self._progress.info("  (Reading hash from metadata first for fast reindex)")
-        
         def hash_file(file_path: Path) -> tuple[Path, str | None, str | None, bool]:
             """Hash a single file. Returns (path, hash, error_msg, from_metadata).
             
@@ -222,26 +217,22 @@ class IndexRebuilder:
             except Exception as e:
                 return file_path, None, str(e), False
         
+        # Start progress tracking
+        self._progress.start_phase("Indexing", stats.total_files)
+        
         with ThreadPoolExecutor(max_workers=self._workers) as executor:
             futures = {executor.submit(hash_file, fp): fp for fp in media_files}
-            processed = 0
             
             for future in as_completed(futures):
                 file_path, hash_value, err_msg, from_meta = future.result()
-                processed += 1
                 
                 if from_meta:
                     from_metadata_count += 1
                 elif hash_value:
                     computed_count += 1
                 
-                # Progress update every 500 files
-                if processed % 500 == 0 or processed == stats.total_files:
-                    pct = 100 * processed // stats.total_files
-                    self._progress.info(
-                        f"  Progress: {processed}/{stats.total_files} ({pct}%) "
-                        f"[{from_metadata_count} from metadata, {computed_count} computed]"
-                    )
+                # Update progress bar
+                self._progress.update_phase(1)
                 
                 # Handle errors
                 if not hash_value:
@@ -279,6 +270,15 @@ class IndexRebuilder:
                 except Exception as e:
                     self._progress.warning(f"DB error for {file_path}: {e}")
                     stats.errors += 1
+        
+        # End progress tracking
+        self._progress.end_phase()
+        
+        # Show summary
+        self._progress.info(
+            f"Indexed {stats.inserted} files "
+            f"({from_metadata_count} from metadata, {computed_count} computed)"
+        )
         
         # Report errors
         if first_errors:
