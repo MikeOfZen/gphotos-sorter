@@ -12,10 +12,20 @@ from PIL import Image
 from .hash_engine import IMAGE_EXTENSIONS
 
 
+# Custom XMP namespace for uncloud metadata
+# We use XMP:Description field with custom prefix for compatibility
+UNCLOUD_HASH_TAG = "XMP-dc:Description"  # Store in Description temporarily
+UNCLOUD_HASH_PREFIX = "uncloud:hash:"
+UNCLOUD_TAGS_PREFIX = "uncloud:tags:"
+
+
 class ExifToolMetadataExtractor:
     """Metadata extractor using exiftool for writing and PIL for reading.
     
     Uses exiftool's -stay_open mode for batch operations.
+    
+    Stores custom uncloud metadata (hash, tags) in XMP fields so the
+    file becomes the source of truth and the database is just an index.
     """
     
     def __init__(self, use_batch_mode: bool = True):
@@ -45,6 +55,116 @@ class ExifToolMetadataExtractor:
         except FileNotFoundError:
             self._process = None
             self._use_batch = False
+    
+    def extract_uncloud_hash(self, path: Path) -> Optional[str]:
+        """Extract the stored uncloud hash from file metadata.
+        
+        This allows fast re-indexing without re-computing hashes.
+        
+        Args:
+            path: Path to the file.
+            
+        Returns:
+            The stored hash, or None if not found.
+        """
+        try:
+            result = subprocess.run(
+                ["exiftool", "-XMP:Subject", "-s", "-s", "-s", str(path)],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                # Subject may contain multiple values, look for our hash
+                subjects = result.stdout.strip().split(", ")
+                for subj in subjects:
+                    if subj.startswith(UNCLOUD_HASH_PREFIX):
+                        return subj[len(UNCLOUD_HASH_PREFIX):]
+            return None
+        except Exception:
+            return None
+    
+    def write_uncloud_hash(self, path: Path, hash_value: str) -> bool:
+        """Write the uncloud hash to file metadata.
+        
+        Stores in XMP:Subject as 'uncloud:hash:HASHVALUE' to avoid
+        conflicting with other metadata.
+        
+        Args:
+            path: Path to the file.
+            hash_value: The similarity hash to store.
+            
+        Returns:
+            True if successful.
+        """
+        tag_value = f"{UNCLOUD_HASH_PREFIX}{hash_value}"
+        return self.write_tags(path, {"XMP:Subject+": tag_value})
+    
+    def extract_uncloud_metadata(self, path: Path) -> dict[str, Any]:
+        """Extract all uncloud-specific metadata from file.
+        
+        Args:
+            path: Path to the file.
+            
+        Returns:
+            Dict with keys: 'hash', 'tags' (may be None).
+        """
+        result = {
+            "hash": None,
+            "tags": [],
+        }
+        
+        try:
+            proc = subprocess.run(
+                ["exiftool", "-XMP:Subject", "-s", "-s", "-s", str(path)],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if proc.returncode == 0 and proc.stdout.strip():
+                subjects = proc.stdout.strip().split(", ")
+                for subj in subjects:
+                    if subj.startswith(UNCLOUD_HASH_PREFIX):
+                        result["hash"] = subj[len(UNCLOUD_HASH_PREFIX):]
+                    elif subj.startswith(UNCLOUD_TAGS_PREFIX):
+                        tags_str = subj[len(UNCLOUD_TAGS_PREFIX):]
+                        result["tags"] = tags_str.split("|") if tags_str else []
+        except Exception:
+            pass
+        
+        return result
+    
+    def write_uncloud_metadata(
+        self,
+        path: Path,
+        hash_value: Optional[str] = None,
+        tags: Optional[list[str]] = None,
+    ) -> bool:
+        """Write uncloud metadata to file.
+        
+        Args:
+            path: Path to the file.
+            hash_value: Optional hash to store.
+            tags: Optional list of tags.
+            
+        Returns:
+            True if successful.
+        """
+        subjects = []
+        if hash_value:
+            subjects.append(f"{UNCLOUD_HASH_PREFIX}{hash_value}")
+        if tags:
+            subjects.append(f"{UNCLOUD_TAGS_PREFIX}{'|'.join(tags)}")
+        
+        if not subjects:
+            return True
+        
+        # Write each subject as a separate tag
+        tag_dict = {}
+        for i, subj in enumerate(subjects):
+            tag_dict[f"XMP:Subject+"] = subj
+            
+        return self.write_tags(path, tag_dict)
     
     def extract_datetime(
         self, 

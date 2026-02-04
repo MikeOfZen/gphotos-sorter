@@ -1,6 +1,6 @@
-# gphotos-sorter
+# uncloud
 
-A CLI tool for ingesting and organizing Google Photos takeout exports and other photo archives. It deduplicates media using perceptual hashing, preserves album metadata as EXIF tags, and organizes files into a clean folder structure.
+uncloud — a CLI tool for ingesting and organizing Google Photos takeout exports and other photo archives. It deduplicates media using perceptual hashing, preserves album metadata as EXIF tags, and organizes files into a clean folder structure.
 
 **Because degoogling shouldn't require a PhD in file management.** 📸
 

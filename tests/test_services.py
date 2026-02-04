@@ -309,3 +309,282 @@ class TestFileManager:
         # (Implementation may vary - just test it doesn't crash)
         result = manager.copy_file(source, target)
         assert isinstance(result, bool)
+
+
+class TestIndexRebuilder:
+    """Tests for IndexRebuilder service."""
+    
+    @pytest.fixture
+    def mock_progress(self):
+        """Create a mock progress reporter."""
+        from unittest.mock import MagicMock
+        
+        progress = MagicMock()
+        progress.info = MagicMock()
+        progress.warning = MagicMock()
+        progress.error = MagicMock()
+        progress.print_header = MagicMock()
+        progress.print_config = MagicMock()
+        progress.print_stats = MagicMock()
+        return progress
+    
+    @pytest.fixture
+    def mock_hash_engine(self):
+        """Create a mock hash engine."""
+        from unittest.mock import MagicMock
+        
+        engine = MagicMock()
+        engine.compute_hash = MagicMock(return_value="hash123")
+        return engine
+    
+    @pytest.fixture
+    def sample_library(self, tmp_path: Path) -> Path:
+        """Create a sample output library structure."""
+        root = tmp_path / "output"
+        owner_dir = root / "TestOwner"
+        year_month = owner_dir / "2024-01"
+        year_month.mkdir(parents=True)
+        
+        # Create some media files
+        (year_month / "photo1.jpg").write_bytes(b"photo1")
+        (year_month / "photo2.png").write_bytes(b"photo2")
+        (year_month / "video.mp4").write_bytes(b"video")
+        
+        return root
+    
+    def test_scan_media_files(self, sample_library, mock_progress, mock_hash_engine):
+        """Test scanning for media files."""
+        from uncloud.services.index_rebuilder import IndexRebuilder
+        
+        rebuilder = IndexRebuilder(
+            hash_engine=mock_hash_engine,
+            progress=mock_progress,
+            workers=2,
+        )
+        
+        files = rebuilder.scan_media_files(sample_library)
+        
+        assert len(files) == 3
+        assert any(f.name == "photo1.jpg" for f in files)
+        assert any(f.name == "photo2.png" for f in files)
+        assert any(f.name == "video.mp4" for f in files)
+    
+    def test_rebuild_dry_run(self, sample_library, mock_progress, mock_hash_engine):
+        """Test rebuild in dry run mode."""
+        from uncloud.services.index_rebuilder import IndexRebuilder
+        
+        rebuilder = IndexRebuilder(
+            hash_engine=mock_hash_engine,
+            progress=mock_progress,
+            workers=2,
+        )
+        
+        db_path = sample_library / ".test.db"
+        
+        stats = rebuilder.rebuild(
+            output_dir=sample_library,
+            db_path=db_path,
+            dry_run=True,
+        )
+        
+        # Dry run shouldn't create database
+        assert not db_path.exists()
+        assert stats.total_files == 3
+        assert stats.inserted == 0  # Dry run doesn't insert
+    
+    def test_rebuild_creates_database(self, sample_library, mock_progress, mock_hash_engine):
+        """Test rebuild creates database with records."""
+        from uncloud.services.index_rebuilder import IndexRebuilder
+        
+        # Make hash unique per file
+        call_count = [0]
+        def unique_hash(path):
+            call_count[0] += 1
+            return f"hash_{call_count[0]}"
+        mock_hash_engine.compute_hash = unique_hash
+        
+        rebuilder = IndexRebuilder(
+            hash_engine=mock_hash_engine,
+            progress=mock_progress,
+            workers=2,
+        )
+        
+        db_path = sample_library / ".test.db"
+        
+        stats = rebuilder.rebuild(
+            output_dir=sample_library,
+            db_path=db_path,
+            dry_run=False,
+            backup=False,
+        )
+        
+        # Should create database
+        assert db_path.exists()
+        assert stats.total_files == 3
+        assert stats.inserted == 3
+        assert stats.errors == 0
+    
+    def test_rebuild_detects_duplicates(self, sample_library, mock_progress, mock_hash_engine):
+        """Test rebuild detects duplicate hashes."""
+        from uncloud.services.index_rebuilder import IndexRebuilder
+        
+        # Return same hash for all files
+        mock_hash_engine.compute_hash = lambda path: "same_hash"
+        
+        rebuilder = IndexRebuilder(
+            hash_engine=mock_hash_engine,
+            progress=mock_progress,
+            workers=2,
+        )
+        
+        db_path = sample_library / ".test.db"
+        
+        stats = rebuilder.rebuild(
+            output_dir=sample_library,
+            db_path=db_path,
+            dry_run=False,
+            backup=False,
+        )
+        
+        # All files are inserted (DB indexes all FS files, even duplicates)
+        # But duplicates are tracked separately for reporting
+        assert stats.inserted == 3
+        assert stats.skipped_duplicates == 2  # 2 files had same hash as first
+    
+    def test_extract_owner_from_path(self, sample_library, mock_progress, mock_hash_engine):
+        """Test owner extraction from path structure."""
+        from uncloud.services.index_rebuilder import IndexRebuilder
+        
+        rebuilder = IndexRebuilder(
+            hash_engine=mock_hash_engine,
+            progress=mock_progress,
+        )
+        
+        # File structure: output/TestOwner/2024-01/photo1.jpg
+        file_path = sample_library / "TestOwner" / "2024-01" / "photo1.jpg"
+        
+        owner = rebuilder._extract_owner(file_path, sample_library)
+        
+        assert owner == "TestOwner"
+
+
+class TestFileOpsSynchronizer:
+    """Tests for FileOpsSynchronizer service."""
+    
+    @pytest.fixture
+    def sample_db(self, tmp_path: Path):
+        """Create a sample database with records."""
+        from uncloud.persistence.database import SQLiteMediaRepository, MediaRecord
+        
+        db_path = tmp_path / "test.db"
+        repo = SQLiteMediaRepository(db_path)
+        
+        # Create sample files
+        file1 = tmp_path / "photo1.jpg"
+        file2 = tmp_path / "photo2.jpg"
+        file3 = tmp_path / "photo3.jpg"
+        file1.write_bytes(b"test image 1")
+        file2.write_bytes(b"test image 2")
+        file3.write_bytes(b"test image 3")
+        
+        # Add records
+        repo.upsert(MediaRecord(
+            canonical_path=str(file1),
+            similarity_hash="hash1",
+            owner="test",
+        ))
+        repo.upsert(MediaRecord(
+            canonical_path=str(file2),
+            similarity_hash="hash1",  # Same hash (duplicate)
+            owner="test",
+        ))
+        repo.upsert(MediaRecord(
+            canonical_path=str(file3),
+            similarity_hash="hash2",
+            owner="test",
+        ))
+        
+        yield repo, tmp_path
+        
+        repo.close()
+    
+    def test_delete_file_syncs_fs_and_db(self, sample_db):
+        """Test that delete removes from both FS and DB."""
+        from uncloud.services.file_ops_sync import FileOpsSynchronizer
+        
+        repo, tmp_path = sample_db
+        sync = FileOpsSynchronizer(repository=repo, dry_run=False)
+        
+        file1 = tmp_path / "photo1.jpg"
+        assert file1.exists()
+        assert repo.get_by_path(str(file1)) is not None
+        
+        result = sync.delete_file(file1)
+        
+        assert result.success
+        assert not file1.exists()
+        assert repo.get_by_path(str(file1)) is None
+    
+    def test_delete_file_dry_run(self, sample_db):
+        """Test that dry run doesn't actually delete."""
+        from uncloud.services.file_ops_sync import FileOpsSynchronizer
+        
+        repo, tmp_path = sample_db
+        sync = FileOpsSynchronizer(repository=repo, dry_run=True)
+        
+        file1 = tmp_path / "photo1.jpg"
+        
+        result = sync.delete_file(file1)
+        
+        assert result.success
+        assert file1.exists()  # Still exists
+        assert repo.get_by_path(str(file1)) is not None  # Still in DB
+    
+    def test_rename_file_syncs_fs_and_db(self, sample_db):
+        """Test that rename updates both FS and DB."""
+        from uncloud.services.file_ops_sync import FileOpsSynchronizer
+        
+        repo, tmp_path = sample_db
+        sync = FileOpsSynchronizer(repository=repo, dry_run=False)
+        
+        old_path = tmp_path / "photo3.jpg"
+        new_path = tmp_path / "renamed.jpg"
+        
+        result = sync.rename_file(old_path, new_path)
+        
+        assert result.success
+        assert not old_path.exists()
+        assert new_path.exists()
+        assert repo.get_by_path(str(old_path)) is None
+        assert repo.get_by_path(str(new_path)) is not None
+    
+    def test_get_duplicate_hashes(self, sample_db):
+        """Test finding duplicate hashes in DB."""
+        repo, _ = sample_db
+        
+        duplicates = repo.get_duplicate_hashes()
+        
+        # hash1 has 2 files
+        assert len(duplicates) == 1
+        assert duplicates[0] == ("hash1", 2)
+    
+    def test_delete_duplicates_by_hash(self, sample_db):
+        """Test deleting duplicates by hash."""
+        from uncloud.services.file_ops_sync import FileOpsSynchronizer
+        
+        repo, tmp_path = sample_db
+        sync = FileOpsSynchronizer(repository=repo, dry_run=False)
+        
+        # Should have 2 files with hash1
+        records = repo.get_all_by_hash("hash1")
+        assert len(records) == 2
+        
+        # Delete duplicates, keep first
+        results = sync.delete_duplicates_by_hash("hash1", keep_policy="first")
+        
+        assert len(results) == 1
+        assert results[0].success
+        
+        # Should have 1 file left
+        records = repo.get_all_by_hash("hash1")
+        assert len(records) == 1

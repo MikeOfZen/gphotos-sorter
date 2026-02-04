@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "uncloud"
 version = "1.0.0"
-description = "CLI tool for ingesting and organizing Google Photos takeout exports"
+description = "uncloud — CLI tool for ingesting and organizing Google Photos takeout exports and other photo archives"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
@@ -47,6 +47,7 @@ build = [
 
 [project.scripts]
 uncloud = "uncloud.cli:main"
+uncloud-rebuild-index = "uncloud.cli:rebuild_index_main"
 
 [project.urls]
 Homepage = "https://github.com/MikeOfZen/uncloud"

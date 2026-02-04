@@ -18,7 +18,10 @@ class MediaRecord:
     tags: str = ""
     width: Optional[int] = None
     height: Optional[int] = None
-    source_paths: str = ""  # JSON list
+    source_paths: str = ""  # JSON list of source paths
+    faces_hashes: str = ""  # JSON list of face recognition hashes (future)
+    ai_desc: str = ""  # AI-generated description (future)
+    objects: str = ""  # JSON list of detected objects (future)
     created_at: Optional[datetime] = field(default_factory=datetime.now)
     updated_at: Optional[datetime] = field(default_factory=datetime.now)
     id: Optional[int] = None
@@ -70,6 +73,9 @@ class SQLiteMediaRepository:
                 width INTEGER,
                 height INTEGER,
                 source_paths TEXT,
+                faces_hashes TEXT,
+                ai_desc TEXT,
+                objects TEXT,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
@@ -100,6 +106,32 @@ class SQLiteMediaRepository:
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        
+        self._conn.commit()
+        
+        # Run migrations for existing databases
+        self._migrate_schema()
+    
+    def _migrate_schema(self) -> None:
+        """Apply schema migrations to existing databases."""
+        assert self._conn is not None
+        cursor = self._conn.cursor()
+        
+        # Check if we need to add new columns
+        cursor.execute("PRAGMA table_info(media)")
+        columns = {row[1] for row in cursor.fetchall()}
+        
+        # Add faces_hashes column if missing
+        if "faces_hashes" not in columns:
+            cursor.execute("ALTER TABLE media ADD COLUMN faces_hashes TEXT")
+        
+        # Add ai_desc column if missing
+        if "ai_desc" not in columns:
+            cursor.execute("ALTER TABLE media ADD COLUMN ai_desc TEXT")
+        
+        # Add objects column if missing
+        if "objects" not in columns:
+            cursor.execute("ALTER TABLE media ADD COLUMN objects TEXT")
         
         self._conn.commit()
     
@@ -139,8 +171,9 @@ class SQLiteMediaRepository:
         cursor.execute("""
             INSERT INTO media (
                 canonical_path, similarity_hash, owner, date_taken,
-                tags, width, height, source_paths, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                tags, width, height, source_paths, 
+                faces_hashes, ai_desc, objects, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(canonical_path) DO UPDATE SET
                 similarity_hash = excluded.similarity_hash,
                 owner = excluded.owner,
@@ -149,6 +182,9 @@ class SQLiteMediaRepository:
                 width = excluded.width,
                 height = excluded.height,
                 source_paths = excluded.source_paths,
+                faces_hashes = excluded.faces_hashes,
+                ai_desc = excluded.ai_desc,
+                objects = excluded.objects,
                 updated_at = CURRENT_TIMESTAMP
         """, (
             record.canonical_path,
@@ -159,6 +195,9 @@ class SQLiteMediaRepository:
             record.width,
             record.height,
             record.source_paths,
+            record.faces_hashes,
+            record.ai_desc,
+            record.objects,
         ))
         
         # Update source path index
@@ -223,6 +262,128 @@ class SQLiteMediaRepository:
         self._conn.commit()
         return count
     
+    def delete_by_path(self, path: str) -> bool:
+        """Delete a record by its canonical path.
+        
+        Args:
+            path: The canonical path of the file.
+            
+        Returns:
+            True if a record was deleted.
+        """
+        assert self._conn is not None
+        cursor = self._conn.cursor()
+        
+        # First get the hash to clean up source_path_index
+        cursor.execute(
+            "SELECT similarity_hash FROM media WHERE canonical_path = ?",
+            (path,)
+        )
+        row = cursor.fetchone()
+        
+        # Delete from media table
+        cursor.execute("DELETE FROM media WHERE canonical_path = ?", (path,))
+        deleted = cursor.rowcount > 0
+        
+        # Clean up source_path_index entries pointing to this path
+        cursor.execute(
+            "DELETE FROM source_path_index WHERE path = ?",
+            (path,)
+        )
+        
+        self._conn.commit()
+        return deleted
+    
+    def update_path(self, old_path: str, new_path: str) -> bool:
+        """Update a record's canonical path (for rename/move).
+        
+        Args:
+            old_path: Current path.
+            new_path: New path.
+            
+        Returns:
+            True if a record was updated.
+        """
+        assert self._conn is not None
+        cursor = self._conn.cursor()
+        
+        cursor.execute(
+            """UPDATE media 
+               SET canonical_path = ?, updated_at = CURRENT_TIMESTAMP 
+               WHERE canonical_path = ?""",
+            (new_path, old_path)
+        )
+        updated = cursor.rowcount > 0
+        
+        # Also update source_path_index if the path was there
+        cursor.execute(
+            "UPDATE source_path_index SET path = ? WHERE path = ?",
+            (new_path, old_path)
+        )
+        
+        self._conn.commit()
+        return updated
+    
+    def get_all_by_hash(self, similarity_hash: str) -> list[MediaRecord]:
+        """Get all records with a given hash (for finding duplicates).
+        
+        Args:
+            similarity_hash: The hash to search for.
+            
+        Returns:
+            List of all records with this hash.
+        """
+        assert self._conn is not None
+        cursor = self._conn.cursor()
+        cursor.execute(
+            "SELECT * FROM media WHERE similarity_hash = ?",
+            (similarity_hash,)
+        )
+        return [self._row_to_record(row) for row in cursor.fetchall()]
+    
+    def get_by_path(self, path: str) -> Optional[MediaRecord]:
+        """Get record by canonical path.
+        
+        Args:
+            path: The canonical path.
+            
+        Returns:
+            MediaRecord if found, None otherwise.
+        """
+        assert self._conn is not None
+        cursor = self._conn.cursor()
+        cursor.execute(
+            "SELECT * FROM media WHERE canonical_path = ?",
+            (path,)
+        )
+        row = cursor.fetchone()
+        return self._row_to_record(row) if row else None
+    
+    def get_duplicate_hashes(self) -> list[tuple[str, int]]:
+        """Get all hashes that have more than one file.
+        
+        Returns:
+            List of (hash, count) tuples for duplicates.
+        """
+        assert self._conn is not None
+        cursor = self._conn.cursor()
+        cursor.execute("""
+            SELECT similarity_hash, COUNT(*) as cnt 
+            FROM media 
+            WHERE similarity_hash IS NOT NULL
+            GROUP BY similarity_hash 
+            HAVING cnt > 1
+            ORDER BY cnt DESC
+        """)
+        return [(row[0], row[1]) for row in cursor.fetchall()]
+    
+    def count_all(self) -> int:
+        """Count total records in database."""
+        assert self._conn is not None
+        cursor = self._conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM media")
+        return cursor.fetchone()[0]
+    
     def close(self) -> None:
         """Close database connection."""
         if self._conn:
@@ -238,6 +399,9 @@ class SQLiteMediaRepository:
             except Exception:
                 pass
         
+        # Handle optional new columns that may not exist in older databases
+        row_dict = dict(row)
+        
         return MediaRecord(
             id=row["id"],
             canonical_path=row["canonical_path"],
@@ -248,6 +412,9 @@ class SQLiteMediaRepository:
             width=row["width"],
             height=row["height"],
             source_paths=row["source_paths"] or "",
+            faces_hashes=row_dict.get("faces_hashes") or "",
+            ai_desc=row_dict.get("ai_desc") or "",
+            objects=row_dict.get("objects") or "",
         )
     
     def __enter__(self) -> "SQLiteMediaRepository":

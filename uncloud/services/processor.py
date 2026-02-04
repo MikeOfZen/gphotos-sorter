@@ -317,7 +317,25 @@ class MediaProcessor:
                 raise KeyboardInterrupt()
             
             # Check if hash exists in database
-            existing = self._deps.repository.get_by_hash(group.hash_value)
+            existing_record = self._deps.repository.get_by_hash(group.hash_value)
+            existing = None
+            
+            if existing_record:
+                # Convert MediaRecord to HashResult for deduplication
+                existing = HashResult(
+                    item=MediaItem(
+                        path=Path(existing_record.canonical_path),
+                        owner=existing_record.owner,
+                        tags=(),
+                        sidecar_path=None,
+                    ),
+                    similarity_hash=existing_record.similarity_hash,
+                    date_taken=existing_record.date_taken,
+                    date_source="db",
+                    width=existing_record.width,
+                    height=existing_record.height,
+                    error=None,
+                )
             
             # Resolve duplicates
             best, duplicates = self._deps.deduplicator.resolve(group, existing)
