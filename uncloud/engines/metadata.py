@@ -122,6 +122,69 @@ class ExifToolDaemon:
         except Exception:
             return False
     
+    def extract_subjects(self, path: Path) -> list[str]:
+        """Extract all XMP:Subject tags from file metadata.
+        
+        Args:
+            path: Path to the file.
+            
+        Returns:
+            List of subject strings, empty list if none.
+        """
+        if not self.is_alive:
+            return []
+        
+        try:
+            cmd = f"-XMP:Subject\n-s\n-s\n-s\n{path}\n-execute\n"
+            self._process.stdin.write(cmd)
+            self._process.stdin.flush()
+            
+            # Read response until {ready}
+            output_lines = []
+            while True:
+                line = self._process.stdout.readline()
+                if not line:
+                    break
+                if "{ready}" in line:
+                    break
+                output_lines.append(line.strip())
+            
+            # Parse result
+            output = " ".join(output_lines).strip()
+            if output:
+                return [s.strip() for s in output.split(",") if s.strip()]
+            return []
+        except Exception:
+            return []
+    
+    def write_subject(self, path: Path, subject: str) -> bool:
+        """Write a subject tag to file metadata.
+        
+        Args:
+            path: Path to the file.
+            subject: Subject string to add (appended to existing).
+            
+        Returns:
+            True if successful.
+        """
+        if not self.is_alive:
+            return False
+        
+        try:
+            cmd = f"-overwrite_original\n-XMP:Subject+={subject}\n{path}\n-execute\n"
+            self._process.stdin.write(cmd)
+            self._process.stdin.flush()
+            
+            # Read response until {ready}
+            while True:
+                line = self._process.stdout.readline()
+                if not line or "{ready}" in line:
+                    break
+            
+            return True
+        except Exception:
+            return False
+    
     def close(self) -> None:
         """Shutdown the daemon gracefully."""
         if self._process is None:

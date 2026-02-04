@@ -207,3 +207,130 @@ class MediaScanner(Protocol):
     ) -> tuple[int, int]:  # (media_count, non_media_count)
         """Count files without loading them all."""
         ...
+
+
+# ============ Processing Pipeline Protocols ============
+
+class ProcessingContext(Protocol):
+    """Context passed to each processor during pipeline execution."""
+    
+    @property
+    def path(self) -> Path:
+        """Path to the media file being processed."""
+        ...
+    
+    @property
+    def image(self) -> Optional[Any]:  # PIL.Image.Image
+        """Loaded PIL Image for images, None for videos."""
+        ...
+    
+    @property
+    def is_video(self) -> bool:
+        """Whether this file is a video (image processing skipped)."""
+        ...
+    
+    @property
+    def results(self) -> dict[str, Any]:
+        """Results from earlier processors in the pipeline.
+        
+        Keys are processor keys like 'phash_v1'.
+        Used for processor dependencies.
+        """
+        ...
+    
+    @property
+    def write_cache(self) -> bool:
+        """Whether to write results to file metadata."""
+        ...
+
+
+class FileProcessor(Protocol):
+    """Interface for file processing operators.
+    
+    Each processor extracts one piece of information from a file:
+    - Perceptual hash
+    - CLIP embedding
+    - Face detection
+    - Object detection
+    - etc.
+    
+    Results are cached in file metadata (with uncloud: prefix)
+    and stored in database.
+    """
+    
+    @property
+    def key(self) -> str:
+        """Unique identifier for this processor.
+        
+        Used for:
+        - Cache key in metadata (prefixed with 'uncloud:')
+        - Column/field in database
+        - Dependency resolution
+        - Error reporting
+        
+        Examples: 'phash', 'clip', 'faces', 'objects'
+        Format: lowercase, no version (version is separate property)
+        """
+        ...
+    
+    @property
+    def version(self) -> int:
+        """Version number for cache invalidation.
+        
+        Increment when:
+        - Algorithm changes
+        - Model updates
+        - Output format changes
+        
+        Cached values with older versions are recomputed.
+        """
+        ...
+    
+    @property
+    def depends_on(self) -> list[str]:
+        """Keys of processors that must run before this one.
+        
+        Empty list means no dependencies.
+        
+        Examples:
+        - [] for phash (no dependencies)
+        - ['faces'] for face_recognition (needs face bounding boxes)
+        """
+        ...
+    
+    def can_process(self, ctx: ProcessingContext) -> bool:
+        """Check if this processor can handle this file.
+        
+        Use to skip:
+        - Videos for image-only processors
+        - Images for video-only processors
+        - Unsupported file formats
+        
+        Args:
+            ctx: Processing context with file info
+            
+        Returns:
+            True if this processor should run on this file
+        """
+        ...
+    
+    def process(self, ctx: ProcessingContext) -> Any:
+        """Process a file and return result.
+        
+        Args:
+            ctx: Processing context containing:
+                - ctx.path: File path
+                - ctx.image: PIL Image (None for videos)
+                - ctx.results: Results from earlier processors
+        
+        Returns:
+            Computed result (any JSON-serializable type):
+            - str for hash
+            - list[float] for embeddings  
+            - list[dict] for detected objects
+            - etc.
+        
+        Raises:
+            Exception: Processing failed (caught by pipeline)
+        """
+        ...
